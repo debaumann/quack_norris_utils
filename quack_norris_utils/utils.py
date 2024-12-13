@@ -49,38 +49,24 @@ class DuckieSegment:
         self.cost = cost
     def get_path_array(self):
         if self.type == 'STRAIGHT':
-            dist = np.linalg.norm(np.array([self.start.x, self.start.y]) - np.array([self.end.x, self.end.y]))
-            n_steps = int(dist/self.speed/self.dt)
-            x = np.linspace(self.start.x, self.end.x, n_steps)
-            y = np.linspace(self.start.y, self.end.y, n_steps)
-            theta = np.ones(n_steps)*self.start.theta
+            path_coords = np.array(self.shapely_path.coords)
+            x = path_coords[:, 0]
+            y = path_coords[:, 1]
+            theta = np.ones(len(x))*self.start.theta
             return np.vstack([x, y, theta]).T
         elif self.type == 'LEFT':
-            start = self.start.theta
-            end = self.end.theta
-            if start < 0:
-                start+= 2*np.pi
-            if end < 0:
-                end += 2*np.pi
-            
-            angle = np.linspace(start,end, int(np.abs(self.sector)/self.speed/self.dt))
-            angle = np.mod(angle, 2*np.pi)  # Normalize angles to be within [0, 2*pi]
-            x = self.start.x + self.radius*np.cos(start + np.pi/2) + self.radius*np.cos(angle - np.pi/2)
-            y = self.start.y + self.radius*np.sin(start + np.pi/2)+ self.radius*np.sin(angle - np.pi/2)
-            theta = angle
+            path_coords = np.array(self.shapely_path.coords)
+            x = path_coords[:, 0]
+            y = path_coords[:, 1]
+            angles = np.linspace(0, self.sector, len(x))
+            theta = self.start.theta + angles 
             return np.vstack([x, y, theta]).T
         elif self.type == 'RIGHT':
-            start = self.start.theta
-            end = self.end.theta
-            if start > 0:
-                start-= 2*np.pi
-            if end > 0:
-                end -= 2*np.pi
-            angle = np.linspace(start,end, int(np.abs(self.sector)/self.speed/self.dt))
-            angle = np.mod(angle, 2*np.pi)
-            x = self.start.x + self.radius*np.cos(start - np.pi/2) + self.radius*np.cos(angle + np.pi/2)
-            y = self.start.y + self.radius*np.sin(start - np.pi/2)+ self.radius*np.sin(angle + np.pi/2)
-            theta = angle
+            path_coords = np.array(self.shapely_path.coords)
+            x = path_coords[:, 0]
+            y = path_coords[:, 1]
+            angles = np.linspace(0, self.sector, len(x))
+            theta = self.start.theta - angles 
             return np.vstack([x, y, theta]).T
 
 class DuckieCorner:
@@ -89,15 +75,18 @@ class DuckieCorner:
         self.radius = radius
         self.type = type
         self.shapely_obs = self.get_obs() 
+        self.placement_x = None
+        self.placement_y = None
+        self.placement_theta = None
     def get_poses_dubins(self):
         
-        placement_x = self.pose.x + self.radius*np.cos(self.pose.theta - np.pi/2)
-        placement_y = self.pose.y + self.radius*np.sin(self.pose.theta - np.pi/2)
-        placement_theta = self.pose.theta
-        return SETransform(placement_x, placement_y, placement_theta)
+        self.placement_x = self.pose.x + self.radius*np.cos(self.pose.theta - np.pi/2)
+        self.placement_y = self.pose.y + self.radius*np.sin(self.pose.theta - np.pi/2)
+        self.placement_theta = self.pose.theta
+        return SETransform(self.placement_x, self.placement_y, self.placement_theta)
         
     def get_obs(self):
-        return sg.Point(self.curb).buffer(self.radius-0.1)
+        return sg.Point(self.placement_x, self.placement_y).buffer(self.radius-0.1)
     
 class DuckieObstacle:
     def __init__(self, pose: SETransform, radius: float): #type is left or right
