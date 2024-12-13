@@ -89,6 +89,7 @@ class DuckieCorner:
         self.radius = radius
         self.type = type
         self.shapely_obs = self.get_obs() 
+        self.placement = self.get_poses_dubins()
     def get_poses_dubins(self):
         
         placement_x = self.pose.x + self.radius*np.cos(self.pose.theta - np.pi/2)
@@ -97,7 +98,7 @@ class DuckieCorner:
         return SETransform(placement_x, placement_y, placement_theta)
         
     def get_obs(self):
-        return sg.Point(self.curb).buffer(self.radius-0.1)
+        return sg.Point((self.pose.x,self.pose.y)).buffer(self.radius-0.1)
     
 class DuckieObstacle:
     def __init__(self, pose: SETransform, radius: float): #type is left or right
