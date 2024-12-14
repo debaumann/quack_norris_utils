@@ -36,13 +36,13 @@ class DubinCircle():
         self.radius = radius
 
 class DuckieSegment:
-    def __init__(self, start: SETransform, end: SETransform, radius: float, type: str, path: sg.LineString, cost: float):   
+    def __init__(self, start: SETransform, end: SETransform, radius: float, type: str, path: sg.LineString, cost: float,speed:float):   
         self.start = start
         self.end = end
         self.radius = radius
         self.type = type
         self.sector = end.theta - start.theta
-        self.speed = 0.1
+        self.speed = speed
         self.shapely_path= path
         self.cost = None
         self.dt = 0.1
@@ -53,21 +53,24 @@ class DuckieSegment:
             x = path_coords[:, 0]
             y = path_coords[:, 1]
             theta = np.ones(len(x))*self.start.theta
-            return np.vstack([x, y, theta]).T
+            angular_speed = np.zeros(len(x))
+            return np.vstack([x, y, theta,angular_speed]).T
         elif self.type == 'LEFT':
             path_coords = np.array(self.shapely_path.coords)
             x = path_coords[:, 0]
             y = path_coords[:, 1]
             angles = np.linspace(0, self.sector, len(x))
+            angular_speed =  self.speed/self.radius * np.ones(len(x))
             theta = self.start.theta + angles 
-            return np.vstack([x, y, theta]).T
+            return np.vstack([x, y, theta,angular_speed]).T
         elif self.type == 'RIGHT':
             path_coords = np.array(self.shapely_path.coords)
             x = path_coords[:, 0]
             y = path_coords[:, 1]
             angles = np.linspace(0, self.sector, len(x))
+            angular_speed =  -self.speed/self.radius * np.ones(len(x))
             theta = self.start.theta - angles 
-            return np.vstack([x, y, theta]).T
+            return np.vstack([x, y, theta,angular_speed]).T
 
 class DuckieCorner:
     def __init__(self, pose:SETransform, radius: float, type: str):
@@ -142,7 +145,7 @@ class dubins:
         right_circle = DubinCircle(right_center, radius, CircleType.RIGHT)
         return [left_circle, right_circle]
     def approximate_straight(self,start:SETransform, end:SETransform):
-        n_seg = 36
+        n_seg = 5
         dist = np.linalg.norm(np.array([start.x, start.y]) - np.array([end.x, end.y]))
         straight_cost = dist
         x = np.linspace(start.x, end.x, n_seg+1)
@@ -365,9 +368,9 @@ class dubins:
         
         duckie_path= []
         
-        duckie_path.append(DuckieSegment(start, p1, sector1[1], c1_type ,start_circle,start_circle_cost))
-        duckie_path.append(DuckieSegment(p1, p2, 0, 'STRAIGHT', line_1,straight_cost))
-        duckie_path.append(DuckieSegment(p2,end, sector2[1], c2_type, end_circle,end_circle_cost))
+        duckie_path.append(DuckieSegment(start, p1, sector1[1], c1_type ,start_circle,start_circle_cost,self.speed))
+        duckie_path.append(DuckieSegment(p1, p2, 0, 'STRAIGHT', line_1,straight_cost,self.speed))
+        duckie_path.append(DuckieSegment(p2,end, sector2[1], c2_type, end_circle,end_circle_cost,self.speed))
     
         return duckie_path
     
@@ -418,9 +421,9 @@ class dubins:
                     'start_circle': start_circle, 'end_circle': end_circle,'cost': cost, 'c1_type': c1_type, 'c2_type': c2_type}
         duckie_path= []
         
-        duckie_path.append(DuckieSegment(start, p1, sector1[1], c1_type ,start_circle,start_circle_cost))
-        duckie_path.append(DuckieSegment(p1, p2, 0, 'STRAIGHT', line_1,straight_cost))
-        duckie_path.append(DuckieSegment(p2,end, sector2[1], c2_type, end_circle,end_circle_cost))
+        duckie_path.append(DuckieSegment(start, p1, sector1[1], c1_type ,start_circle,start_circle_cost,self.speed))
+        duckie_path.append(DuckieSegment(p1, p2, 0, 'STRAIGHT', line_1,straight_cost,self.speed))
+        duckie_path.append(DuckieSegment(p2,end, sector2[1], c2_type, end_circle,end_circle_cost,self.speed))
     
         return duckie_path
             
