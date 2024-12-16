@@ -47,33 +47,58 @@ class DuckieSegment:
         self.cost = None
         self.dt = 0.1
         self.cost = cost
+    def inverse_kinematics(self):
+        L = 0.102
+        if self.type == 'STRAIGHT':
+            omega = 0
+            speed_r = self.speed
+            speed_l = self.speed
+        elif self.type == 'LEFT':
+            omega = self.speed/self.radius
+            speed_r = omega*(self.radius + L/2)
+            speed_l = omega*(self.radius - L/2)
+        elif self.type == 'RIGHT':
+            omega = self.speed/self.radius
+            speed_r = omega*(self.radius - L/2)
+            speed_l = omega*(self.radius - L/2)
+        
+        return speed_l, speed_r
     def get_path_array(self):
         if self.type == 'STRAIGHT':
             path_coords = np.array(self.shapely_path.coords)
             x = path_coords[:, 0]
             y = path_coords[:, 1]
-            theta = np.ones(len(x))*self.start.theta
-            angular_speed = np.zeros(len(x))
-            radius = np.ones(len(x))*np.inf
-            return np.vstack([x, y, theta,angular_speed,radius]).T
+            x_end = x[-1]
+            y_end = y[-1]
+            theta_end = self.end.theta
+            angular_speed = 0
+            radius = np.inf
+            speed_l, speed_r = self.inverse_kinematics()
+            return np.array([angular_speed,radius,speed_l,speed_r,x_end,y_end,theta_end])
         elif self.type == 'LEFT':
             path_coords = np.array(self.shapely_path.coords)
             x = path_coords[:, 0]
             y = path_coords[:, 1]
-            angles = np.linspace(0, self.sector, len(x))
-            angular_speed =  self.speed/self.radius * np.ones(len(x))
-            theta = self.start.theta + angles 
-            radius = self.radius*np.ones(len(x))
-            return np.vstack([x, y, theta,angular_speed,radius]).T
+            x_end = x[-1]
+            y_end = y[-1]
+            theta_end = self.end.theta
+            angular_speed =  self.speed/self.radius 
+            speed_l, speed_r = self.inverse_kinematics()
+            
+            radius = self.radius
+            return np.array([angular_speed,radius,speed_l,speed_r,x_end,y_end,theta_end])
         elif self.type == 'RIGHT':
             path_coords = np.array(self.shapely_path.coords)
             x = path_coords[:, 0]
             y = path_coords[:, 1]
-            angles = np.linspace(0, self.sector, len(x))
-            angular_speed =  -self.speed/self.radius * np.ones(len(x))
-            theta = self.start.theta - angles 
-            radius = self.radius*np.ones(len(x))
-            return np.vstack([x, y, theta,angular_speed,radius]).T
+            x_end = x[-1]
+            y_end = y[-1]
+            theta_end = self.end.theta
+            angular_speed =  -self.speed/self.radius 
+            speed_l, speed_r = self.inverse_kinematics()
+            
+            radius = self.radius
+            return np.array([angular_speed,radius,speed_l,speed_r,x_end,y_end,theta_end])
 
 class DuckieCorner:
     def __init__(self, pose:SETransform, radius: float, type: str):
