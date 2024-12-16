@@ -54,7 +54,8 @@ class DuckieSegment:
             y = path_coords[:, 1]
             theta = np.ones(len(x))*self.start.theta
             angular_speed = np.zeros(len(x))
-            return np.vstack([x, y, theta,angular_speed]).T
+            radius = np.ones(len(x))*np.inf
+            return np.vstack([x, y, theta,angular_speed,radius]).T
         elif self.type == 'LEFT':
             path_coords = np.array(self.shapely_path.coords)
             x = path_coords[:, 0]
@@ -62,7 +63,8 @@ class DuckieSegment:
             angles = np.linspace(0, self.sector, len(x))
             angular_speed =  self.speed/self.radius * np.ones(len(x))
             theta = self.start.theta + angles 
-            return np.vstack([x, y, theta,angular_speed]).T
+            radius = self.radius*np.ones(len(x))
+            return np.vstack([x, y, theta,angular_speed,radius]).T
         elif self.type == 'RIGHT':
             path_coords = np.array(self.shapely_path.coords)
             x = path_coords[:, 0]
@@ -70,7 +72,8 @@ class DuckieSegment:
             angles = np.linspace(0, self.sector, len(x))
             angular_speed =  -self.speed/self.radius * np.ones(len(x))
             theta = self.start.theta - angles 
-            return np.vstack([x, y, theta,angular_speed]).T
+            radius = self.radius*np.ones(len(x))
+            return np.vstack([x, y, theta,angular_speed,radius]).T
 
 class DuckieCorner:
     def __init__(self, pose:SETransform, radius: float, type: str):
