@@ -145,7 +145,7 @@ class dubins:
         right_circle = DubinCircle(right_center, radius, CircleType.RIGHT)
         return [left_circle, right_circle]
     def approximate_straight(self,start:SETransform, end:SETransform):
-        n_seg = 5
+        n_seg = 10
         dist = np.linalg.norm(np.array([start.x, start.y]) - np.array([end.x, end.y]))
         straight_cost = dist
         x = np.linspace(start.x, end.x, n_seg+1)
@@ -180,7 +180,7 @@ class dubins:
             if angle > 0:
                 angle -= 2*np.pi
         
-        n_seg = 36
+        n_seg = 10
         circ_cost = np.abs(angle*circle.radius)
         angle_step = angle/n_seg
         points = []
