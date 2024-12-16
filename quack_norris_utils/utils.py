@@ -449,26 +449,48 @@ class dubins:
 
 
 
-
+###################################################################################################################
 ###################################################################################################################
 ################################################ Map service utils ################################################
+###################################################################################################################
 ###################################################################################################################
 from quack_norris.srv import Map, MapResponse # type: ignore
 from quack_norris.msg import Node, Corner # type: ignore
 from geometry_msgs.msg import Pose2D
 
-def calculate_shortest_path(start_node: DuckieNode, goal_node: DuckieNode):
+###################################################### Data #######################################################
+TILE_DATA = {"TILE_SIZE": 0.585, "D_CENTER_TO_CENTERLINE": 0.2925, "CENTERLINE_WIDTH": 0.025, "LANE_WIDTH": 0.205} # [m]
+
+###################################################### Main #######################################################
+def initialize_map(start_node: DuckieNode, goal_node: DuckieNode):
+    return _calculate_shortest_path(True, start_node, goal_node)
+
+def update_map(current_node: DuckieNode):
+    return _calculate_shortest_path(False, current_node, None)
+
+def _calculate_shortest_path(reset: bool, start_node: DuckieNode, goal_node: DuckieNode):
     rospy.wait_for_service("map_service")
     try:
         map_service = rospy.ServiceProxy("map_service", Map)
         # rospy.loginfo(f"Calling map service with start node ({start_node.tag_id}) and goal node ({goal_node.tag_id})")
-        response = map_service(start_node=duckienode_to_node(start_node), goal_node=duckienode_to_node(goal_node))
-        return respone_to_nodelist(response)
+        response = map_service(reset=reset, start_node=duckienode_to_node(start_node), goal_node=duckienode_to_node(goal_node))
+        return _respone_to_nodelist(response)
     except rospy.ServiceException as e:
         rospy.logerr(f"Service call failed: {e}")
         return
 
-def respone_to_nodelist(map) -> List[DuckieNode]:
+################################################## Helper classes #################################################
+class MapNode:
+    def __init__(self, index_x: int, index_y: int, apriltag_id: int):
+        self.center_index:  Tuple[int, int]     = (index_x, index_y)
+        self.apriltag_id:   int                 = apriltag_id
+        self.neighbors:     List[MapNode]       = []
+
+    def __repr__(self):
+        return f"MapNode(Center: {self.center_index}, ID: {self.apriltag_id})"
+
+#################################################### Converters ###################################################
+def _respone_to_nodelist(map) -> List[DuckieNode]:
     nodes = [node_to_duckienode(n) for n in map.nodes]
     if len(nodes) == 0:
         rospy.logwarn("No nodes in map")
@@ -493,52 +515,44 @@ def duckiecorner_to_corner(duckiecorner: DuckieCorner) -> Corner:
                       radius=duckiecorner.radius,
                       type=duckiecorner.type)
     return None
-    
-    # return Corner(pose=Pose2D(x=0.0, y=0.0, theta=duckiecorner.pose.theta),
-    #               radius=duckiecorner.radius,
-    #               type=duckiecorner.type)
 
 def node_to_duckienode(node: Node) -> DuckieNode:
     return DuckieNode(pose=SETransform(node.pose.x, node.pose.y, node.pose.theta),
                       tag_id=node.apriltag_id)
 
 def duckienode_to_node(duckienode: DuckieNode) -> Node:
-    return Node(pose=Pose2D(x=duckienode.pose.x, y=duckienode.pose.y, theta=duckienode.pose.theta),
-                apriltag_id=duckienode.tag_id,
-                corner=duckiecorner_to_corner(duckienode.corner))
+    if duckienode is not None:
+        return Node(pose=Pose2D(x=duckienode.pose.x, y=duckienode.pose.y, theta=duckienode.pose.theta),
+                    apriltag_id=duckienode.tag_id,
+                    corner=duckiecorner_to_corner(duckienode.corner))
+    return None
 
-def find_closest_points(current_point: Tuple[int, int], points: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-    points_array = np.array(points)
-    x0, y0 = current_point
-    result = []
+def node_to_mapnode(node: Node) -> MapNode:
+    index_x, index_y = tile_pos_to_index((node.pose.x, node.pose.y))
+    return MapNode(index_x, index_y, node.apriltag_id)
 
-    # Define direction conditions as tuples (dx, dy) and their corresponding comparison functions
-    directions = [
-        (-1, 0, lambda x: np.argmax(x)),  # -x: largest x < x0
-        (1, 0, lambda x: np.argmin(x)),   # +x: smallest x > x0
-        (0, -1, lambda y: np.argmax(y)),  # -y: largest y < y0
-        (0, 1, lambda y: np.argmin(y))    # +y: smallest y > y0
-    ]
-    
-    # Check all directions
-    for dx, dy, arg_fn in directions:
-        mask = ((points_array[:, 0] < x0 if dx == -1 else points_array[:, 0] > x0 if dx == 1 else points_array[:, 0] == x0) &
-                (points_array[:, 1] < y0 if dy == -1 else points_array[:, 1] > y0 if dy == 1 else points_array[:, 1] == y0))
-        
-        if np.any(mask):  # If there are points in this direction
-            filtered = points_array[mask]
-            idx = arg_fn(filtered[:, 0] if dx else filtered[:, 1])
-            result.append(tuple(filtered[idx]))
-    
-    return result
+def mapnode_to_node(mapnode: MapNode, corner: Corner) -> Node:
+    xabs, yabs = tile_index_to_pos(mapnode.center_index)
+    return Node(pose=Pose2D(x=xabs, y=yabs, theta=0), # Theta?
+                apriltag_id=mapnode.apriltag_id,
+                corner=corner)
 
-def plot_solved_graph(all_nodes: list, path: list, fig_save_path: str):
+def tile_pos_to_index(pos: Tuple[float, float]) -> Tuple[int, int]:
+    rospy.loginfo(f"Converting position {pos} to index {int(pos[0] / TILE_DATA['TILE_SIZE'])}, {int(pos[1] / TILE_DATA['TILE_SIZE'])}")
+    return (int(pos[0] / TILE_DATA["TILE_SIZE"]), int(pos[1] / TILE_DATA["TILE_SIZE"]))
+
+def tile_index_to_pos(index: Tuple[int, int]) -> Tuple[float, float]:
+    return ((index[0] + 0.5) * TILE_DATA["TILE_SIZE"], (index[1] + 0.5) * TILE_DATA["TILE_SIZE"])
+
+##################################################### Plotters ####################################################
+def plot_solved_graph(all_nodes: List[MapNode], path: List[MapNode], fig_save_path: str):
     """
     Plots the graph and the A* path.
 
     Args:
         all_nodes (List[MapNode]): List of all nodes in the graph.
         path (List[MapNode]): Path found by A* search.
+        fig_save_path (str): Path to save the figure (including the file name with extension).
     """
     plt.figure(figsize=(8, 8))
 
@@ -573,5 +587,67 @@ def plot_solved_graph(all_nodes: list, path: list, fig_save_path: str):
     plt.ylabel("Y")
     plt.legend()
     plt.grid(True)
-    # plt.show()
     plt.savefig(fig_save_path)
+
+################################################## Miscellaneous ##################################################
+def find_closest_points(current_point: Tuple[int, int], points: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    points_array = np.array(points)
+    x0, y0 = current_point
+    result = []
+
+    # Define direction conditions as tuples (dx, dy) and their corresponding comparison functions
+    directions = [
+        (-1, 0, lambda x: np.argmax(x)),  # -x: largest x < x0
+        (1, 0, lambda x: np.argmin(x)),   # +x: smallest x > x0
+        (0, -1, lambda y: np.argmax(y)),  # -y: largest y < y0
+        (0, 1, lambda y: np.argmin(y))    # +y: smallest y > y0
+    ]
+    
+    # Check all directions
+    for dx, dy, arg_fn in directions:
+        mask = ((points_array[:, 0] < x0 if dx == -1 else points_array[:, 0] > x0 if dx == 1 else points_array[:, 0] == x0) &
+                (points_array[:, 1] < y0 if dy == -1 else points_array[:, 1] > y0 if dy == 1 else points_array[:, 1] == y0))
+        
+        if np.any(mask):  # If there are points in this direction
+            filtered = points_array[mask]
+            idx = arg_fn(filtered[:, 0] if dx else filtered[:, 1])
+            result.append(tuple(filtered[idx]))
+    
+    return result
+
+def fill_path_corners(path: List[MapNode]) -> List[MapNode]:
+    """
+    Fill in the corners of each node in the path. Used in the local planner later.
+
+    Args:
+        path (List[MapNode]): Path to fill with corners
+
+    Returns:
+        List[MapNode]: Path with corners
+    """
+    filled_path = [mapnode_to_node(path[0], Corner())]
+    for node in path[1:-1]:
+        prev_node = path[path.index(node) - 1]
+        next_node = path[path.index(node) + 1]
+
+        # Find the corner between the previous and next node
+        prev_node_pos = np.array(prev_node.center_index)
+        next_node_pos = np.array(next_node.center_index)
+        curr_node_pos = np.array(node.center_index)
+        if np.array_equal(prev_node_pos, curr_node_pos) or np.array_equal(curr_node_pos, next_node_pos):
+            raise ValueError("Two nodes in the path have the same position - Should not happen. Exiting...")
+        vec_to = (curr_node_pos - prev_node_pos) / np.linalg.norm(curr_node_pos - prev_node_pos)
+        vec_from = (next_node_pos - curr_node_pos) / np.linalg.norm(next_node_pos - curr_node_pos)
+        dir = int(np.cross(vec_from, vec_to))
+        
+        corner_pos = np.array(tile_index_to_pos(curr_node_pos)) + (vec_from - vec_to) * TILE_DATA["TILE_SIZE"] / 2
+        corner_theta = -dir * np.pi / 4 # +/-?
+        corner_radius = abs(dir)*(TILE_DATA["D_CENTER_TO_CENTERLINE"] + TILE_DATA["CENTERLINE_WIDTH"] / 2 + TILE_DATA["LANE_WIDTH"] / 2)
+        corner_type = dir # -1: LEFT, 0: STRAIGHT, 1: RIGHT
+        corner = Corner(pose=Pose2D(x=corner_pos[0], y=corner_pos[1], theta=corner_theta),
+                        radius=corner_radius,
+                        type=corner_type)
+        filled_path.append(mapnode_to_node(node, corner))
+        
+    filled_path.append(mapnode_to_node(path[-1], Corner()))
+    return filled_path
