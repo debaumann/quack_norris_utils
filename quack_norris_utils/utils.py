@@ -8,6 +8,7 @@ import shapely.ops as so
 import shapely.affinity as sa
 from typing import List, Tuple
 
+import rospy
 
 from enum import Enum
 
@@ -445,3 +446,132 @@ class dubins:
         else:
             return False
         
+
+
+
+
+###################################################################################################################
+################################################ Map service utils ################################################
+###################################################################################################################
+from quack_norris.srv import Map, MapResponse # type: ignore
+from quack_norris.msg import Node, Corner # type: ignore
+from geometry_msgs.msg import Pose2D
+
+def calculate_shortest_path(start_node: DuckieNode, goal_node: DuckieNode):
+    rospy.wait_for_service("map_service")
+    try:
+        map_service = rospy.ServiceProxy("map_service", Map)
+        # rospy.loginfo(f"Calling map service with start node ({start_node.tag_id}) and goal node ({goal_node.tag_id})")
+        response = map_service(start_node=duckienode_to_node(start_node), goal_node=duckienode_to_node(goal_node))
+        return respone_to_nodelist(response)
+    except rospy.ServiceException as e:
+        rospy.logerr(f"Service call failed: {e}")
+        return
+
+def respone_to_nodelist(map) -> List[DuckieNode]:
+    nodes = [node_to_duckienode(n) for n in map.nodes]
+    if len(nodes) == 0:
+        rospy.logwarn("No nodes in map")
+    elif len(nodes) == 1:
+        rospy.logwarn("Only one node in map")
+    else:
+        for ind, node in enumerate(nodes):
+            if ind != 0:
+                node.insert_parent(nodes[ind-1])
+            if ind != len(nodes)-1:
+                node.insert_next(nodes[ind+1])
+    return nodes
+
+def corner_to_duckiecorner(corner: Corner) -> DuckieCorner:
+    return DuckieCorner(pose=SETransform(corner.pose.x, corner.pose.y, corner.pose.theta),
+                        radius=corner.radius,
+                        type=corner.type)
+
+def duckiecorner_to_corner(duckiecorner: DuckieCorner) -> Corner:
+    if duckiecorner is not None:    
+        return Corner(pose=Pose2D(x=duckiecorner.pose.x, y=duckiecorner.pose.y, theta=duckiecorner.pose.theta),
+                      radius=duckiecorner.radius,
+                      type=duckiecorner.type)
+    return None
+    
+    # return Corner(pose=Pose2D(x=0.0, y=0.0, theta=duckiecorner.pose.theta),
+    #               radius=duckiecorner.radius,
+    #               type=duckiecorner.type)
+
+def node_to_duckienode(node: Node) -> DuckieNode:
+    return DuckieNode(pose=SETransform(node.pose.x, node.pose.y, node.pose.theta),
+                      tag_id=node.apriltag_id)
+
+def duckienode_to_node(duckienode: DuckieNode) -> Node:
+    return Node(pose=Pose2D(x=duckienode.pose.x, y=duckienode.pose.y, theta=duckienode.pose.theta),
+                apriltag_id=duckienode.tag_id,
+                corner=duckiecorner_to_corner(duckienode.corner))
+
+def find_closest_points(current_point: Tuple[int, int], points: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    points_array = np.array(points)
+    x0, y0 = current_point
+    result = []
+
+    # Define direction conditions as tuples (dx, dy) and their corresponding comparison functions
+    directions = [
+        (-1, 0, lambda x: np.argmax(x)),  # -x: largest x < x0
+        (1, 0, lambda x: np.argmin(x)),   # +x: smallest x > x0
+        (0, -1, lambda y: np.argmax(y)),  # -y: largest y < y0
+        (0, 1, lambda y: np.argmin(y))    # +y: smallest y > y0
+    ]
+    
+    # Check all directions
+    for dx, dy, arg_fn in directions:
+        mask = ((points_array[:, 0] < x0 if dx == -1 else points_array[:, 0] > x0 if dx == 1 else points_array[:, 0] == x0) &
+                (points_array[:, 1] < y0 if dy == -1 else points_array[:, 1] > y0 if dy == 1 else points_array[:, 1] == y0))
+        
+        if np.any(mask):  # If there are points in this direction
+            filtered = points_array[mask]
+            idx = arg_fn(filtered[:, 0] if dx else filtered[:, 1])
+            result.append(tuple(filtered[idx]))
+    
+    return result
+
+def plot_solved_graph(all_nodes: list, path: list, fig_save_path: str):
+    """
+    Plots the graph and the A* path.
+
+    Args:
+        all_nodes (List[MapNode]): List of all nodes in the graph.
+        path (List[MapNode]): Path found by A* search.
+    """
+    plt.figure(figsize=(8, 8))
+
+    # Plot all edges (connections between neighbors) in light gray
+    for node in all_nodes:
+        for neighbor in node.neighbors:
+            x_values = [node.center_index[0], neighbor.center_index[0]]
+            y_values = [node.center_index[1], neighbor.center_index[1]]
+            plt.plot(x_values, y_values, color='lightgray', linestyle='-', linewidth=1)
+
+    # Highlight the A* path in red
+    for i in range(len(path) - 1):
+        node = path[i]
+        next_node = path[i + 1]
+        x_values = [node.center_index[0], next_node.center_index[0]]
+        y_values = [node.center_index[1], next_node.center_index[1]]
+        plt.plot(x_values, y_values, color='red', linestyle='-', linewidth=2)
+
+    # Plot all nodes as points
+    for node in all_nodes:
+        plt.scatter(node.center_index[0], node.center_index[1], color='blue', s=50)
+        plt.text(node.center_index[0], node.center_index[1], str(node.apriltag_id),
+                    fontsize=9, ha='center', va='center', color='white')
+
+    # Highlight start and goal nodes
+    if path:
+        plt.scatter(path[0].center_index[0], path[0].center_index[1], color='green', s=100, label='Start')
+        plt.scatter(path[-1].center_index[0], path[-1].center_index[1], color='orange', s=100, label='Goal')
+
+    plt.title("A* Search Path")
+    plt.xlabel("X")
+    plt.ylabel("Y")
+    plt.legend()
+    plt.grid(True)
+    # plt.show()
+    plt.savefig(fig_save_path)
