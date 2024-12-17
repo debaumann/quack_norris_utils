@@ -6,7 +6,7 @@ import matplotlib.patches as patches
 import shapely.geometry as sg
 import shapely.ops as so
 import shapely.affinity as sa
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Union
 
 import rospy
 
@@ -462,13 +462,16 @@ from geometry_msgs.msg import Pose2D
 TILE_DATA = {"TILE_SIZE": 0.585, "D_CENTER_TO_CENTERLINE": 0.2925, "CENTERLINE_WIDTH": 0.025, "LANE_WIDTH": 0.205} # [m]
 
 ###################################################### Main #######################################################
-def initialize_map(start_node: DuckieNode, goal_node: DuckieNode):
+def initialize_map(start_node: DuckieNode, goal_node: DuckieNode) -> List[DuckieNode]:
     return _calculate_shortest_path(True, start_node, goal_node)
 
-def update_map(current_node: DuckieNode):
-    return _calculate_shortest_path(False, current_node, None)
+# def update_map(current_node: DuckieNode):
+#     return _calculate_shortest_path(False, current_node, None)
+def update_map(current_position: Union[SETransform, DuckieNode], faulty_node: DuckieNode) -> List[DuckieNode]:
+    current_node = DuckieNode(current_position)
+    return _calculate_shortest_path(False, current_node, faulty_node)
 
-def _calculate_shortest_path(reset: bool, start_node: DuckieNode, goal_node: DuckieNode):
+def _calculate_shortest_path(reset: bool, start_node: DuckieNode, goal_node: DuckieNode) -> Optional[List[DuckieNode]]:
     rospy.wait_for_service("map_service")
     try:
         map_service = rospy.ServiceProxy("map_service", Map)
@@ -477,7 +480,7 @@ def _calculate_shortest_path(reset: bool, start_node: DuckieNode, goal_node: Duc
         return _respone_to_nodelist(response)
     except rospy.ServiceException as e:
         rospy.logerr(f"Service call failed: {e}")
-        return
+        return None
 
 ################################################## Helper classes #################################################
 class MapNode:
@@ -502,9 +505,8 @@ def _respone_to_nodelist(map) -> List[DuckieNode]:
                 node.insert_parent(nodes[ind-1])
             if ind != len(nodes)-1:
                 node.insert_next(nodes[ind+1])
-    rospy.loginfo(f"Nodes: {[n.tag_id for n in nodes]}")
-    rospy.loginfo(f"Corners: {[n.corner.type for n in nodes]}")
-    # rospy.loginfo()
+    # rospy.loginfo(f"Nodes: {[n.tag_id for n in nodes]}")
+    # rospy.loginfo(f"Corners: {[n.corner.type for n in nodes]}")
     return nodes
 
 def corner_to_duckiecorner(corner: Corner) -> DuckieCorner:
@@ -544,14 +546,14 @@ def mapnode_to_node(mapnode: MapNode, corner: Corner) -> Node:
                 corner=corner)
 
 def tile_pos_to_index(pos: Tuple[float, float]) -> Tuple[int, int]:
-    rospy.loginfo(f"Converting position {pos} to index {int(pos[0] / TILE_DATA['TILE_SIZE'])}, {int(pos[1] / TILE_DATA['TILE_SIZE'])}")
-    return (int(pos[0] / TILE_DATA["TILE_SIZE"]), int(pos[1] / TILE_DATA["TILE_SIZE"]))
+    rospy.loginfo(f"Converting position {pos} to index ({round((pos[0] - 0.5) / TILE_DATA['TILE_SIZE'])}, {round((pos[1] - 0.5) / TILE_DATA['TILE_SIZE'])})")
+    return (round((pos[0] - 0.5) / TILE_DATA["TILE_SIZE"]), round((pos[1] - 0.5) / TILE_DATA["TILE_SIZE"]))
 
 def tile_index_to_pos(index: Tuple[int, int]) -> Tuple[float, float]:
     return ((index[0] + 0.5) * TILE_DATA["TILE_SIZE"], (index[1] + 0.5) * TILE_DATA["TILE_SIZE"])
 
-##################################################### Plotters ####################################################
-def plot_solved_graph(all_nodes: List[MapNode], path: List[MapNode], fig_save_path: str):
+################################################ Plotters, Printers ###############################################
+def plot_solved_graph(all_nodes: List[MapNode], path: List[MapNode], fig_save_path: str) -> None:
     """
     Plots the graph and the A* path.
 
@@ -594,6 +596,14 @@ def plot_solved_graph(all_nodes: List[MapNode], path: List[MapNode], fig_save_pa
     plt.legend()
     plt.grid(True)
     plt.savefig(fig_save_path)
+
+def print_path(path: List[DuckieNode]) -> None:
+    path_str = "Calculated shortest path:\n"
+    for index, node in enumerate(path):
+        path_str += f"{node.tag_id}: ({node.pose.x}, {node.pose.y})"
+        if index != len(path) - 1:
+            path_str += f" -> "
+    rospy.loginfo(path_str)
 
 ################################################## Miscellaneous ##################################################
 def find_closest_points(current_point: Tuple[int, int], points: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
