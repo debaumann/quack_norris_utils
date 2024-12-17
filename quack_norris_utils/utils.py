@@ -502,6 +502,9 @@ def _respone_to_nodelist(map) -> List[DuckieNode]:
                 node.insert_parent(nodes[ind-1])
             if ind != len(nodes)-1:
                 node.insert_next(nodes[ind+1])
+    rospy.loginfo(f"Nodes: {[n.tag_id for n in nodes]}")
+    rospy.loginfo(f"Corners: {[n.corner.type for n in nodes]}")
+    # rospy.loginfo()
     return nodes
 
 def corner_to_duckiecorner(corner: Corner) -> DuckieCorner:
@@ -517,8 +520,11 @@ def duckiecorner_to_corner(duckiecorner: DuckieCorner) -> Corner:
     return None
 
 def node_to_duckienode(node: Node) -> DuckieNode:
-    return DuckieNode(pose=SETransform(node.pose.x, node.pose.y, node.pose.theta),
-                      tag_id=node.apriltag_id)
+    duckienode = DuckieNode(pose=SETransform(node.pose.x, node.pose.y, node.pose.theta),
+                            tag_id=node.apriltag_id)
+    duckienode.insert_corner(corner_to_duckiecorner(node.corner))
+    return duckienode
+    
 
 def duckienode_to_node(duckienode: DuckieNode) -> Node:
     if duckienode is not None:
