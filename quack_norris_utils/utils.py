@@ -125,14 +125,22 @@ class DuckieCorner:
         self.shapely_obs = self.get_obs() 
         self.placement = self.get_poses_dubins()
     def get_poses_dubins(self):
-        
-        self.placement_x = self.pose.x + self.radius*np.cos(self.pose.theta - np.pi/2)
-        self.placement_y = self.pose.y + self.radius*np.sin(self.pose.theta - np.pi/2)
+        if self.type == 'LEFT':
+            self.placement_x = self.pose.x + self.radius*np.cos(self.pose.theta - np.pi/2)
+            self.placement_y = self.pose.y + self.radius*np.sin(self.pose.theta - np.pi/2)
+        elif self.type == 'RIGHT':
+            self.placement_x = self.pose.x + self.radius*np.cos(self.pose.theta + np.pi/2)
+            self.placement_y = self.pose.y + self.radius*np.sin(self.pose.theta + np.pi/2)
+        elif self.type == 'STRAIGHT':
+            self.placement_x = self.pose.x
+            self.placement_y = self.pose.y
         self.placement_theta = self.pose.theta
+
         return SETransform(self.placement_x, self.placement_y, self.placement_theta)
         
     def get_obs(self):
-        return sg.Point((self.pose.x,self.pose.y)).buffer(self.radius-0.1)
+        str_to_int = {"LEFT": 1, "STRAIGHT": 0, "RIGHT": 1}
+        return sg.Point((self.pose.x,self.pose.y)).buffer((self.radius-0.1)*str_to_int[self.type])
     def update_corners(self, new_radius):
         self.radius = new_radius
         self.shapely_obs = self.get_obs() 
@@ -550,9 +558,10 @@ def _respone_to_nodelist(map) -> List[DuckieNode]:
     return nodes
 
 def corner_to_duckiecorner(corner: Corner) -> DuckieCorner:
+    int_to_str = {-1: "LEFT", 0: "STRAIGHT", 1: "RIGHT"}
     return DuckieCorner(pose=SETransform(corner.pose.x, corner.pose.y, corner.pose.theta),
                         radius=corner.radius,
-                        type=corner.type)
+                        type=int_to_str[corner.type])
 
 def duckiecorner_to_corner(duckiecorner: DuckieCorner) -> Corner:
     if duckiecorner is not None:    
@@ -889,8 +898,10 @@ def fill_path_corners(path: List[MapNode]) -> List[Node]:
         dir = int(np.cross(vec_from, vec_to))
         
         corner_pos = np.array(tile_index_to_pos(curr_node_pos)) + (vec_from - vec_to) * TILE_DATA["TILE_SIZE"] / 2
-        corner_theta = -dir * np.pi / 4 # +/-?
-        corner_radius = abs(dir)*(TILE_DATA["D_CENTER_TO_CENTERLINE"] + TILE_DATA["CENTERLINE_WIDTH"] / 2 + TILE_DATA["LANE_WIDTH"] / 2)
+        # corner_theta = -dir * np.pi / 4 # +/-?
+        angle_vec_from = np.arctan2(vec_from[1], vec_from[0])
+        corner_theta = angle_vec_from + dir * np.pi / 2
+        corner_radius = abs(dir)*(3/4)*TILE_DATA["TILE_SIZE"] # (TILE_DATA["D_CENTER_TO_CENTERLINE"] + TILE_DATA["CENTERLINE_WIDTH"] / 2 + TILE_DATA["LANE_WIDTH"] / 2)
         corner_type = dir # -1: LEFT, 0: STRAIGHT, 1: RIGHT
         corner = Corner(pose=Pose2D(x=corner_pos[0], y=corner_pos[1], theta=corner_theta),
                         radius=corner_radius,
