@@ -35,6 +35,45 @@ class DubinCircle():
         self.y = center[1]
         self.radius = radius
 
+class DuckieDriverObstacle():
+    def __init__(self, pose: SETransform, speed: float, lookahead_time: float, lookahead_point: SETransform):
+        self.pose = pose
+        self.length = 0.2
+        self.width = 0.15
+        self.radius = self.width + 0.1
+        self.speed = speed
+        self.dt = 0.1
+        self.lookahead_time = lookahead_time
+        self.path = []
+        self.end = None
+        self.lookahead_point = lookahead_point
+        self.obstacle = self.get_obstacle()
+        
+    def get_obstacle(self):
+        d_over_time = self.speed*self.lookahead_time + self.length
+        x = self.pose.x + d_over_time*np.cos(self.pose.theta)
+        y = self.pose.y + d_over_time*np.sin(self.pose.theta)
+        self.end = SETransform(x, y, self.pose.theta)
+        obst = sg.LineString([(self.pose.x,self.pose.y), (x, y)]).buffer(self.width)
+        return obst
+    def get_poses_dubins(self, ambulance_pose: SETransform):
+        placement_x = self.pose.x + self.radius*np.cos(ambulance_pose.theta + np.pi/2)
+        placement_y = self.pose.y + self.radius*np.sin(ambulance_pose.theta + np.pi/2)
+        placement_theta = ambulance_pose.theta
+        if self.lookahead_point is not None:
+
+            end_placement_theta = np.arctan2(self.lookahead_point.y - placement_y, self.lookahead_point.x - placement_x) - 0.1
+            print('end placement theta', np.rad2deg(end_placement_theta))
+        else:
+            end_placement_theta = ambulance_pose.theta
+            
+        end_placement_x = self.end.x + self.radius*np.cos(end_placement_theta +np.pi/2)
+        end_placement_y = self.end.y + self.radius*np.sin(end_placement_theta + np.pi/2)
+       
+
+        return SETransform(placement_x, placement_y, placement_theta), SETransform(end_placement_x,end_placement_y,end_placement_theta)
+
+        
 class DuckieSegment:
     def __init__(self, start: SETransform, end: SETransform, radius: float, type: str, path: sg.LineString, cost: float,speed:float):   
         self.start = start
@@ -91,6 +130,10 @@ class DuckieCorner:
         
     def get_obs(self):
         return sg.Point((self.pose.x,self.pose.y)).buffer(self.radius-0.1)
+    def update_corners(self, new_radius):
+        self.radius = new_radius
+        self.shapely_obs = self.get_obs() 
+        self.placement = self.get_poses_dubins()
     
 class DuckieObstacle:
     def __init__(self, pose: SETransform, radius: float): #type is left or right
@@ -148,7 +191,7 @@ class dubins:
         right_circle = DubinCircle(right_center, radius, CircleType.RIGHT)
         return [left_circle, right_circle]
     def approximate_straight(self,start:SETransform, end:SETransform):
-        n_seg = 10
+        n_seg = 20
         dist = np.linalg.norm(np.array([start.x, start.y]) - np.array([end.x, end.y]))
         straight_cost = dist
         x = np.linspace(start.x, end.x, n_seg+1)
@@ -183,7 +226,7 @@ class dubins:
             if angle > 0:
                 angle -= 2*np.pi
         
-        n_seg = 10
+        n_seg = 20
         circ_cost = np.abs(angle*circle.radius)
         angle_step = angle/n_seg
         points = []
