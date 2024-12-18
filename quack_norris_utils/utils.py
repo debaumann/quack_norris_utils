@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import shapely.geometry as sg
 import shapely.ops as so
 import shapely.affinity as sa
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Union
 
+import rospy
 
 from enum import Enum
 
@@ -480,3 +483,419 @@ class dubins:
         else:
             return False
         
+
+
+
+###################################################################################################################
+###################################################################################################################
+################################################ Map service utils ################################################
+###################################################################################################################
+###################################################################################################################
+from quack_norris.srv import Map, MapResponse # type: ignore
+from quack_norris.msg import Node, Corner # type: ignore
+from geometry_msgs.msg import Pose2D
+
+import matplotlib
+matplotlib.use('Agg')
+
+###################################################### Data #######################################################
+TILE_DATA = {"TILE_SIZE": 0.585, "D_CENTER_TO_CENTERLINE": 0.2925, "CENTERLINE_WIDTH": 0.025, "LANE_WIDTH": 0.205} # [m]
+
+###################################################### Main #######################################################
+def initialize_map(start_node: DuckieNode, goal_node: DuckieNode) -> List[DuckieNode]:
+    return _calculate_shortest_path(True, start_node, goal_node)
+
+# def update_map(current_node: DuckieNode):
+#     return _calculate_shortest_path(False, current_node, None)
+def update_map(current_position: Union[SETransform, DuckieNode], faulty_node: DuckieNode) -> List[DuckieNode]:
+    current_node = DuckieNode(current_position)
+    return _calculate_shortest_path(False, current_node, faulty_node)
+
+def _calculate_shortest_path(reset: bool, start_node: DuckieNode, goal_node: DuckieNode) -> Optional[List[DuckieNode]]:
+    rospy.wait_for_service("map_service")
+    try:
+        map_service = rospy.ServiceProxy("map_service", Map)
+        # rospy.loginfo(f"Calling map service with start node ({start_node.tag_id}) and goal node ({goal_node.tag_id})")
+        response = map_service(reset=reset, start_node=duckienode_to_node(start_node), goal_node=duckienode_to_node(goal_node))
+        return _respone_to_nodelist(response)
+    except rospy.ServiceException as e:
+        rospy.logerr(f"Service call failed: {e}")
+        return None
+
+################################################## Helper classes #################################################
+class MapNode:
+    def __init__(self, index_x: int, index_y: int, apriltag_id: int):
+        self.center_index:  Tuple[int, int]     = (index_x, index_y)
+        self.apriltag_id:   int                 = apriltag_id
+        self.neighbors:     List[MapNode]       = []
+
+    def __repr__(self):
+        return f"MapNode(Center: {self.center_index}, ID: {self.apriltag_id})"
+
+#################################################### Converters ###################################################
+def _respone_to_nodelist(map) -> List[DuckieNode]:
+    nodes = [node_to_duckienode(n) for n in map.nodes]
+    if len(nodes) == 0:
+        rospy.logwarn("No nodes in map")
+    elif len(nodes) == 1:
+        rospy.logwarn("Only one node in map")
+    else:
+        for ind, node in enumerate(nodes):
+            if ind != 0:
+                node.insert_parent(nodes[ind-1])
+            if ind != len(nodes)-1:
+                node.insert_next(nodes[ind+1])
+    # rospy.loginfo(f"Nodes: {[n.tag_id for n in nodes]}")
+    # rospy.loginfo(f"Corners: {[n.corner.type for n in nodes]}")
+    return nodes
+
+def corner_to_duckiecorner(corner: Corner) -> DuckieCorner:
+    return DuckieCorner(pose=SETransform(corner.pose.x, corner.pose.y, corner.pose.theta),
+                        radius=corner.radius,
+                        type=corner.type)
+
+def duckiecorner_to_corner(duckiecorner: DuckieCorner) -> Corner:
+    if duckiecorner is not None:    
+        return Corner(pose=Pose2D(x=duckiecorner.pose.x, y=duckiecorner.pose.y, theta=duckiecorner.pose.theta),
+                      radius=duckiecorner.radius,
+                      type=duckiecorner.type)
+    return None
+
+def node_to_duckienode(node: Node) -> DuckieNode:
+    duckienode = DuckieNode(pose=SETransform(node.pose.x, node.pose.y, node.pose.theta),
+                            tag_id=node.apriltag_id)
+    duckienode.insert_corner(corner_to_duckiecorner(node.corner))
+    return duckienode
+    
+
+def duckienode_to_node(duckienode: DuckieNode) -> Node:
+    if duckienode is not None:
+        return Node(pose=Pose2D(x=duckienode.pose.x, y=duckienode.pose.y, theta=duckienode.pose.theta),
+                    apriltag_id=duckienode.tag_id,
+                    corner=duckiecorner_to_corner(duckienode.corner))
+    return None
+
+def node_to_mapnode(node: Node) -> MapNode:
+    index_x, index_y = tile_pos_to_index((node.pose.x, node.pose.y))
+    return MapNode(index_x, index_y, node.apriltag_id)
+
+def mapnode_to_node(mapnode: MapNode, corner: Corner) -> Node:
+    xabs, yabs = tile_index_to_pos(mapnode.center_index)
+    return Node(pose=Pose2D(x=xabs, y=yabs, theta=0), # Theta?
+                apriltag_id=mapnode.apriltag_id,
+                corner=corner)
+
+def tile_pos_to_index(pos: Tuple[float, float]) -> Tuple[int, int]:
+    rospy.loginfo(f"Converting position {pos} to index ({round(pos[0] / TILE_DATA['TILE_SIZE'] - 0.5)}, {round(pos[1] / TILE_DATA['TILE_SIZE'] - 0.5)})")
+    return (round(pos[0] / TILE_DATA["TILE_SIZE"] - 0.5), round(pos[1] / TILE_DATA["TILE_SIZE"] - 0.5))
+
+def tile_index_to_pos(index: Tuple[int, int]) -> Tuple[float, float]:
+    return ((index[0] + 0.5) * TILE_DATA["TILE_SIZE"], (index[1] + 0.5) * TILE_DATA["TILE_SIZE"])
+
+################################################ Plotters, Printers ###############################################
+def plot_solved_graph(all_nodes: List[MapNode], path: List[MapNode], fig_save_path: str, map_file: str) -> None:
+    """
+    Plots the graph and the A* path.
+
+    Args:
+        all_nodes (List[MapNode]): List of all nodes in the graph.
+        path (List[MapNode]): Path found by A* search.
+        fig_save_path (str): Path to save the figure (including the file name with extension).
+    """
+    plt.figure(figsize=(8, 8))
+
+    # Extract map image
+    if map_file == "circle_map":
+        img = plt.imread("/home/duckie/repos/quack-norris/map_files/quack_small.png")
+        img_height, img_width = img.shape[:2]
+        factor = 0.0027
+        extent = [0, img_width * factor, 0, img_height * factor]
+    elif map_file == "oval_map":
+        img = plt.imread("/home/duckie/repos/quack-norris/map_files/quack_middle_cropped.png")
+        img = np.rot90(img, k=1)
+        img_height, img_width = img.shape[:2]
+        factor = 0.00454
+        extent = [0, img_width * factor, 0, img_height * factor]
+    else:
+        img = plt.imread("/home/duckie/repos/quack-norris/map_files/quack_big_cropped.png")
+        img = np.rot90(img, k=3)
+        img_height, img_width = img.shape[:2]
+        factor = 0.0072
+        extent = [0, img_width * factor, 0, img_height * factor]
+
+    # Display the map image
+    plt.imshow(img, extent=extent)
+
+    # Scale the node coordinates
+    def scale_coordinates(node):
+        x = (node.center_index[0] + 0.5) * TILE_DATA["TILE_SIZE"]
+        y = (node.center_index[1] + 0.5) * TILE_DATA["TILE_SIZE"]
+        return (x, y)
+        # return (node.center_index[0], node.center_index[1])
+
+    # Plot all edges (connections between neighbors) in light gray
+    for node in all_nodes:
+        for neighbor in node.neighbors:
+            x_values = [scale_coordinates(node)[0], scale_coordinates(neighbor)[0]]
+            y_values = [scale_coordinates(node)[1], scale_coordinates(neighbor)[1]]
+            plt.plot(x_values, y_values, color='blue', linestyle='--', linewidth=2)
+
+    # Highlight the A* path in red
+    for i in range(len(path) - 1):
+        node = path[i]
+        next_node = path[i + 1]
+        x_values = [scale_coordinates(node)[0], scale_coordinates(next_node)[0]]
+        y_values = [scale_coordinates(node)[1], scale_coordinates(next_node)[1]]
+        plt.plot(x_values, y_values, color='lightgreen', linestyle='-', linewidth=5)
+
+    # Plot all nodes as points
+    for node in all_nodes:
+        plt.scatter(scale_coordinates(node)[0], scale_coordinates(node)[1], color='blue', s=200)
+        plt.text(scale_coordinates(node)[0], scale_coordinates(node)[1], str(node.apriltag_id),
+                    fontsize=10, ha='center', va='center', color='white')
+
+    # Highlight start and goal nodes
+    if path:
+        plt.scatter(scale_coordinates(path[0])[0], scale_coordinates(path[0])[1], color='green', s=300, label='Start')
+        plt.scatter(scale_coordinates(path[-1])[0], scale_coordinates(path[-1])[1], color='orange', s=300, label='Goal')
+
+    plt.title("A* Search Path")
+    plt.xlabel("X")
+    plt.ylabel("Y")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(fig_save_path)
+    plt.close()
+
+def plot_solved_graph_with_progress(
+    all_nodes: List[MapNode],
+    path: List[MapNode],
+    fig_save_dir: str,
+    map_file: str,
+    step_size: float = 0.1
+) -> None:
+    """
+    Plots the graph and the A* path progressively, with the start node moving along the path.
+    Saves multiple images showing the progress.
+
+    Args:
+        all_nodes (List[MapNode]): List of all nodes in the graph.
+        path (List[MapNode]): Path found by A* search.
+        fig_save_dir (str): Directory to save the figures.
+        map_file (str): Map file to use for the background image.
+        step_size (float): Step size for splitting the path into finer points.
+    """
+    # Create the directory if it doesn't exist
+    os.makedirs(fig_save_dir, exist_ok=True)
+
+    # Extract map image
+    if map_file == "circle_map":
+        img = plt.imread("/home/duckie/repos/quack-norris/map_files/quack_small.png")
+        img_height, img_width = img.shape[:2]
+        factor = 0.0027
+        extent = [0, img_width * factor, 0, img_height * factor]
+    elif map_file == "oval_map":
+        img = plt.imread("/home/duckie/repos/quack-norris/map_files/quack_middle_cropped.png")
+        img = np.rot90(img, k=1)
+        img_height, img_width = img.shape[:2]
+        factor = 0.00454
+        extent = [0, img_width * factor, 0, img_height * factor]
+    else:
+        img = plt.imread("/home/duckie/repos/quack-norris/map_files/quack_big_cropped.png")
+        img = np.rot90(img, k=3)
+        img_height, img_width = img.shape[:2]
+        factor = 0.0072
+        extent = [0, img_width * factor, 0, img_height * factor]
+
+    # Function to scale the node coordinates
+    def scale_coordinates(node):
+        x = (node.center_index[0] + 0.5) * TILE_DATA["TILE_SIZE"]
+        y = (node.center_index[1] + 0.5) * TILE_DATA["TILE_SIZE"]
+        return (x, y)
+
+    # Function to interpolate points along a segment
+    def interpolate_points(p1, p2, step_size):
+        """
+        Generate intermediate points between p1 and p2 with a given step size.
+        Args:
+            p1: (x, y) coordinates of the starting point.
+            p2: (x, y) coordinates of the ending point.
+            step_size: Distance between successive points.
+        Returns:
+            List of intermediate (x, y) points.
+        """
+        x1, y1 = p1
+        x2, y2 = p2
+        distance = np.hypot(x2 - x1, y2 - y1)
+        steps = int(distance / step_size)
+        return [
+            (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+            for t in np.linspace(0, 1, steps + 1)
+        ]
+
+    # Generate all sub-points along the path
+    sub_points = []
+    for i in range(len(path) - 1):
+        p1 = scale_coordinates(path[i])
+        p2 = scale_coordinates(path[i + 1])
+        sub_points.extend(interpolate_points(p1, p2, step_size))
+
+    # Generate frames for the progressive path visualization
+    for idx, current_position in enumerate(sub_points):
+        plt.figure(figsize=(8, 8))
+
+        # Display the map image
+        plt.imshow(img, extent=extent)
+
+        # Plot all edges (connections between neighbors) in light gray
+        for node in all_nodes:
+            for neighbor in node.neighbors:
+                x_values = [scale_coordinates(node)[0], scale_coordinates(neighbor)[0]]
+                y_values = [scale_coordinates(node)[1], scale_coordinates(neighbor)[1]]
+                plt.plot(x_values, y_values, color='blue', linestyle='--', linewidth=2)
+
+        # Plot the green path from the moving start to the end
+        current_index = sub_points.index(current_position)
+        for i in range(current_index, len(sub_points) - 1):
+            x_values = [sub_points[i][0], sub_points[i + 1][0]]
+            y_values = [sub_points[i][1], sub_points[i + 1][1]]
+            plt.plot(x_values, y_values, color='lightgreen', linestyle='-', linewidth=5)
+
+        # Plot the blue path from the static start to the current position
+        for i in range(current_index):
+            x_values = [sub_points[i][0], sub_points[i + 1][0]]
+            y_values = [sub_points[i][1], sub_points[i + 1][1]]
+            plt.plot(x_values, y_values, color='blue', linestyle='--', linewidth=2)
+
+        # Plot all nodes as points
+        for node in all_nodes:
+            plt.scatter(scale_coordinates(node)[0], scale_coordinates(node)[1], color='blue', s=200)
+            plt.text(scale_coordinates(node)[0], scale_coordinates(node)[1], str(node.apriltag_id),
+                     fontsize=10, ha='center', va='center', color='white')
+
+        # Highlight the moving start node
+        plt.scatter(current_position[0], current_position[1], color='green', s=400, label='Duckiebot')
+
+        # Highlight the goal node
+        plt.scatter(scale_coordinates(path[-1])[0], scale_coordinates(path[-1])[1], color='orange', s=300, label='Goal')
+
+        # Add title and labels
+        plt.title(f"A* Search Path - Step {idx + 1}")
+        plt.xlabel("X")
+        plt.ylabel("Y")
+        plt.legend()
+        plt.grid(True)
+
+        # Save the figure
+        fig_save_path = os.path.join(fig_save_dir, f"path_step_{idx + 1:03d}.png")
+        plt.savefig(fig_save_path)
+        plt.close()
+
+    # Save a final frame with the complete path
+    plt.figure(figsize=(8, 8))
+    plt.imshow(img, extent=extent)
+
+    # Plot all edges
+    for node in all_nodes:
+        for neighbor in node.neighbors:
+            x_values = [scale_coordinates(node)[0], scale_coordinates(neighbor)[0]]
+            y_values = [scale_coordinates(node)[1], scale_coordinates(neighbor)[1]]
+            plt.plot(x_values, y_values, color='blue', linestyle='--', linewidth=2)
+
+    # Plot the entire green path
+    for i in range(len(path) - 1):
+        x_values = [scale_coordinates(path[i])[0], scale_coordinates(path[i + 1])[0]]
+        y_values = [scale_coordinates(path[i])[1], scale_coordinates(path[i + 1])[1]]
+        plt.plot(x_values, y_values, color='lightgreen', linestyle='-', linewidth=5)
+
+    # Plot all nodes
+    for node in all_nodes:
+        plt.scatter(scale_coordinates(node)[0], scale_coordinates(node)[1], color='blue', s=200)
+        plt.text(scale_coordinates(node)[0], scale_coordinates(node)[1], str(node.apriltag_id),
+                 fontsize=10, ha='center', va='center', color='white')
+
+    # Highlight start and goal nodes
+    plt.scatter(scale_coordinates(path[0])[0], scale_coordinates(path[0])[1], color='green', s=300, label='Start')
+    plt.scatter(scale_coordinates(path[-1])[0], scale_coordinates(path[-1])[1], color='orange', s=300, label='Goal')
+
+    # Add title and labels
+    plt.title("A* Search Path - Complete")
+    plt.xlabel("X")
+    plt.ylabel("Y")
+    plt.legend()
+    plt.grid(True)
+
+    final_save_path = os.path.join(fig_save_dir, "path_complete.png")
+    plt.savefig(final_save_path)
+    plt.close()
+
+def print_path(path: List[DuckieNode]) -> None:
+    path_str = "Calculated shortest path:\n"
+    for index, node in enumerate(path):
+        path_str += f"{node.tag_id}: ({node.pose.x}, {node.pose.y})"
+        if index != len(path) - 1:
+            path_str += f" -> "
+    rospy.loginfo(path_str)
+
+################################################## Miscellaneous ##################################################
+def find_closest_points(current_point: Tuple[int, int], points: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    points_array = np.array(points)
+    x0, y0 = current_point
+    result = []
+
+    # Define direction conditions as tuples (dx, dy) and their corresponding comparison functions
+    directions = [
+        (-1, 0, lambda x: np.argmax(x)),  # -x: largest x < x0
+        (1, 0, lambda x: np.argmin(x)),   # +x: smallest x > x0
+        (0, -1, lambda y: np.argmax(y)),  # -y: largest y < y0
+        (0, 1, lambda y: np.argmin(y))    # +y: smallest y > y0
+    ]
+    
+    # Check all directions
+    for dx, dy, arg_fn in directions:
+        mask = ((points_array[:, 0] < x0 if dx == -1 else points_array[:, 0] > x0 if dx == 1 else points_array[:, 0] == x0) &
+                (points_array[:, 1] < y0 if dy == -1 else points_array[:, 1] > y0 if dy == 1 else points_array[:, 1] == y0))
+        
+        if np.any(mask):  # If there are points in this direction
+            filtered = points_array[mask]
+            idx = arg_fn(filtered[:, 0] if dx else filtered[:, 1])
+            result.append(tuple(filtered[idx]))
+    
+    return result
+
+def fill_path_corners(path: List[MapNode]) -> List[Node]:
+    """
+    Fill in the corners of each node in the path. Used in the local planner later.
+
+    Args:
+        path (List[MapNode]): Path to fill with corners
+
+    Returns:
+        List[Node]: Path with corners
+    """
+    filled_path = [mapnode_to_node(path[0], Corner())]
+    for node in path[1:-1]:
+        prev_node = path[path.index(node) - 1]
+        next_node = path[path.index(node) + 1]
+
+        # Find the corner between the previous and next node
+        prev_node_pos = np.array(prev_node.center_index)
+        next_node_pos = np.array(next_node.center_index)
+        curr_node_pos = np.array(node.center_index)
+        if np.array_equal(prev_node_pos, curr_node_pos) or np.array_equal(curr_node_pos, next_node_pos):
+            raise ValueError("Two nodes in the path have the same position - Should not happen. Exiting...")
+        vec_to = (curr_node_pos - prev_node_pos) / np.linalg.norm(curr_node_pos - prev_node_pos)
+        vec_from = (next_node_pos - curr_node_pos) / np.linalg.norm(next_node_pos - curr_node_pos)
+        dir = int(np.cross(vec_from, vec_to))
+        
+        corner_pos = np.array(tile_index_to_pos(curr_node_pos)) + (vec_from - vec_to) * TILE_DATA["TILE_SIZE"] / 2
+        corner_theta = -dir * np.pi / 4 # +/-?
+        corner_radius = abs(dir)*(TILE_DATA["D_CENTER_TO_CENTERLINE"] + TILE_DATA["CENTERLINE_WIDTH"] / 2 + TILE_DATA["LANE_WIDTH"] / 2)
+        corner_type = dir # -1: LEFT, 0: STRAIGHT, 1: RIGHT
+        corner = Corner(pose=Pose2D(x=corner_pos[0], y=corner_pos[1], theta=corner_theta),
+                        radius=corner_radius,
+                        type=corner_type)
+        filled_path.append(mapnode_to_node(node, corner))
+        
+    filled_path.append(mapnode_to_node(path[-1], Corner()))
+    return filled_path
