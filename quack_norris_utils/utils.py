@@ -123,7 +123,7 @@ class DuckieCorner:
         self.placement = self.get_poses_dubins()
     def get_poses_dubins(self):
         
-        self.placement_x = self.pose.x + self.radius*np.cos(self.pose.theta - np.pi/2)
+        self.placement_x = self.pose.x + self.radius*np.cos(self.pose.theta -np.pi/2)
         self.placement_y = self.pose.y + self.radius*np.sin(self.pose.theta - np.pi/2)
         self.placement_theta = self.pose.theta
         return SETransform(self.placement_x, self.placement_y, self.placement_theta)
