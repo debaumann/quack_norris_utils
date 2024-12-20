@@ -505,8 +505,6 @@ TILE_DATA = {"TILE_SIZE": 0.585, "D_CENTER_TO_CENTERLINE": 0.2925, "CENTERLINE_W
 def initialize_map(start_node: DuckieNode, goal_node: DuckieNode) -> List[DuckieNode]:
     return _calculate_shortest_path(True, start_node, goal_node)
 
-# def update_map(current_node: DuckieNode):
-#     return _calculate_shortest_path(False, current_node, None)
 def update_map(current_position: Union[SETransform, DuckieNode], faulty_node: DuckieNode) -> List[DuckieNode]:
     current_node = DuckieNode(current_position)
     return _calculate_shortest_path(False, current_node, faulty_node)
@@ -515,7 +513,6 @@ def _calculate_shortest_path(reset: bool, start_node: DuckieNode, goal_node: Duc
     rospy.wait_for_service("map_service")
     try:
         map_service = rospy.ServiceProxy("map_service", Map)
-        # rospy.loginfo(f"Calling map service with start node ({start_node.tag_id}) and goal node ({goal_node.tag_id})")
         response = map_service(reset=reset, start_node=duckienode_to_node(start_node), goal_node=duckienode_to_node(goal_node))
         return _respone_to_nodelist(response)
     except rospy.ServiceException as e:
@@ -581,7 +578,7 @@ def node_to_mapnode(node: Node) -> MapNode:
 
 def mapnode_to_node(mapnode: MapNode, corner: Corner) -> Node:
     xabs, yabs = tile_index_to_pos(mapnode.center_index)
-    return Node(pose=Pose2D(x=xabs, y=yabs, theta=0), # Theta?
+    return Node(pose=Pose2D(x=xabs, y=yabs, theta=0),
                 apriltag_id=mapnode.apriltag_id,
                 corner=corner)
 
@@ -631,7 +628,6 @@ def plot_solved_graph(all_nodes: List[MapNode], path: List[MapNode], fig_save_pa
         x = (node.center_index[0] + 0.5) * TILE_DATA["TILE_SIZE"]
         y = (node.center_index[1] + 0.5) * TILE_DATA["TILE_SIZE"]
         return (x, y)
-        # return (node.center_index[0], node.center_index[1])
 
     # Plot all edges (connections between neighbors) in light gray
     for node in all_nodes:
@@ -667,13 +663,7 @@ def plot_solved_graph(all_nodes: List[MapNode], path: List[MapNode], fig_save_pa
     plt.savefig(fig_save_path)
     plt.close()
 
-def plot_solved_graph_with_progress(
-    all_nodes: List[MapNode],
-    path: List[MapNode],
-    fig_save_dir: str,
-    map_file: str,
-    step_size: float = 0.1
-) -> None:
+def plot_solved_graph_with_progress(all_nodes: List[MapNode], path: List[MapNode], fig_save_dir: str, map_file: str, step_size: float = 0.1) -> None:
     """
     Plots the graph and the A* path progressively, with the start node moving along the path.
     Saves multiple images showing the progress.
@@ -708,13 +698,13 @@ def plot_solved_graph_with_progress(
         extent = [0, img_width * factor, 0, img_height * factor]
 
     # Function to scale the node coordinates
-    def scale_coordinates(node):
+    def scale_coordinates(node: MapNode) -> Tuple[float, float]:
         x = (node.center_index[0] + 0.5) * TILE_DATA["TILE_SIZE"]
         y = (node.center_index[1] + 0.5) * TILE_DATA["TILE_SIZE"]
         return (x, y)
 
     # Function to interpolate points along a segment
-    def interpolate_points(p1, p2, step_size):
+    def interpolate_points(p1: Tuple[float, float], p2: Tuple[float, float], step_size: float) -> List[Tuple[float, float]]:
         """
         Generate intermediate points between p1 and p2 with a given step size.
         Args:
@@ -728,10 +718,7 @@ def plot_solved_graph_with_progress(
         x2, y2 = p2
         distance = np.hypot(x2 - x1, y2 - y1)
         steps = int(distance / step_size)
-        return [
-            (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
-            for t in np.linspace(0, 1, steps + 1)
-        ]
+        return [(x1 + t * (x2 - x1), y1 + t * (y2 - y1)) for t in np.linspace(0, 1, steps + 1)]
 
     # Generate all sub-points along the path
     sub_points = []
@@ -889,7 +876,7 @@ def fill_path_corners(path: List[MapNode]) -> List[Node]:
         dir = int(np.cross(vec_from, vec_to))
         
         corner_pos = np.array(tile_index_to_pos(curr_node_pos)) + (vec_from - vec_to) * TILE_DATA["TILE_SIZE"] / 2
-        corner_theta = -dir * np.pi / 4 # +/-?
+        corner_theta = -dir * np.pi / 4
         corner_radius = abs(dir)*(TILE_DATA["D_CENTER_TO_CENTERLINE"] + TILE_DATA["CENTERLINE_WIDTH"] / 2 + TILE_DATA["LANE_WIDTH"] / 2)
         corner_type = dir # -1: LEFT, 0: STRAIGHT, 1: RIGHT
         corner = Corner(pose=Pose2D(x=corner_pos[0], y=corner_pos[1], theta=corner_theta),
