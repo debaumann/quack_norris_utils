@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import os
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -9,28 +8,32 @@ import shapely.geometry as sg
 import shapely.ops as so
 import shapely.affinity as sa
 from typing import List, Tuple, Optional, Union
-
 import rospy
 
 from enum import Enum
 
-
 class SETransform:
+    """Represents a 2D rigid-body transform (x, y, theta)."""
+
     def __init__(self, x, y, theta):
         self.x = x
         self.y = y
         self.theta = theta
 
     def __call__(self, geom):
+        """
+        Apply the SE(2) transform to a Shapely geometry.
+        Translates first, then rotates around the origin.
+        """
         return sa.rotate(sa.translate(geom, self.x, self.y), self.theta, origin=(0, 0))
 
-
-
 class CircleType(Enum):
+    """Enumeration for Dubins circles: LEFT or RIGHT turns."""
     LEFT = -1
     RIGHT = 1
 
 class DubinCircle():
+    """Represents a Dubins circle used for calculating minimal-turn paths."""
     def __init__(self, center: Tuple[float, float], radius: float, type: CircleType):
         self.center = center
         self.type = type.value
@@ -39,6 +42,10 @@ class DubinCircle():
         self.radius = radius
 
 class DuckieDriverObstacle():
+    """
+    Represents a moving or stationary obstacle (e.g., another Duckie vehicle).
+    Uses its pose, speed, and a lookahead time to determine its occupied space.
+    """
     def __init__(self, pose: SETransform, speed: float, lookahead_time: float, lookahead_point: SETransform):
         self.pose = pose
         self.length = 0.2
@@ -53,109 +60,145 @@ class DuckieDriverObstacle():
         self.obstacle = self.get_obstacle()
         
     def get_obstacle(self):
-        d_over_time = self.speed*self.lookahead_time + self.length
-        x = self.pose.x + d_over_time*np.cos(self.pose.theta)
-        y = self.pose.y + d_over_time*np.sin(self.pose.theta)
+        """
+        Determine the obstacle’s future occupied space as a buffered line segment,
+        extending from its current position forward by its speed * lookahead_time.
+        """
+        d_over_time = self.speed * self.lookahead_time + self.length
+        x = self.pose.x + d_over_time * np.cos(self.pose.theta)
+        y = self.pose.y + d_over_time * np.sin(self.pose.theta)
         self.end = SETransform(x, y, self.pose.theta)
-        obst = sg.LineString([(self.pose.x,self.pose.y), (x, y)]).buffer(self.width)
+        obst = sg.LineString([(self.pose.x, self.pose.y), (x, y)]).buffer(self.width)
         return obst
-    def get_poses_dubins(self, ambulance_pose: SETransform):
-        placement_x = self.pose.x + self.radius*np.cos(ambulance_pose.theta + np.pi/2)
-        placement_y = self.pose.y + self.radius*np.sin(ambulance_pose.theta + np.pi/2)
-        placement_theta = ambulance_pose.theta
-        if self.lookahead_point is not None:
 
-            end_placement_theta = np.arctan2(self.lookahead_point.y - placement_y, self.lookahead_point.x - placement_x) - 0.1
+    def get_poses_dubins(self, ambulance_pose: SETransform):
+        """
+        Compute start/end poses for Dubins path generation considering the obstacle.
+        These poses shift around the obstacle to help the vehicle plan an avoiding path.
+        """
+        placement_x = self.pose.x + self.radius * np.cos(ambulance_pose.theta + np.pi/2)
+        placement_y = self.pose.y + self.radius * np.sin(ambulance_pose.theta + np.pi/2)
+        placement_theta = ambulance_pose.theta
+
+        if self.lookahead_point is not None:
+            # Adjust the end placement theta slightly to guide the path
+            end_placement_theta = np.arctan2(self.lookahead_point.y - placement_y,
+                                             self.lookahead_point.x - placement_x) - 0.1
             print('end placement theta', np.rad2deg(end_placement_theta))
         else:
             end_placement_theta = ambulance_pose.theta
-            
-        end_placement_x = self.end.x + self.radius*np.cos(end_placement_theta +np.pi/2)
-        end_placement_y = self.end.y + self.radius*np.sin(end_placement_theta + np.pi/2)
-       
 
-        return SETransform(placement_x, placement_y, placement_theta), SETransform(end_placement_x,end_placement_y,end_placement_theta)
+        end_placement_x = self.end.x + self.radius * np.cos(end_placement_theta + np.pi/2)
+        end_placement_y = self.end.y + self.radius * np.sin(end_placement_theta + np.pi/2)
 
-        
+        return SETransform(placement_x, placement_y, placement_theta), SETransform(end_placement_x, end_placement_y, end_placement_theta)
+
 class DuckieSegment:
-    def __init__(self, start: SETransform, end: SETransform, radius: float, type: str, path: sg.LineString, cost: float,speed:float):   
+    """
+    Represents a segment of a Dubins path (straight or arc).
+    Includes start/end transforms, radius, segment type, associated path geometry, and cost.
+    """
+    def __init__(self, start: SETransform, end: SETransform, radius: float, type: str,
+                 path: sg.LineString, cost: float, speed: float):   
         self.start = start
         self.end = end
         self.radius = radius
         self.type = type
         self.sector = end.theta - start.theta
         self.speed = speed
-        self.shapely_path= path
-        self.cost = None
-        self.dt = 0.1
+        self.shapely_path = path
         self.cost = cost
+        self.dt = 0.1
+
     def get_path_array(self):
+        """
+        Convert the segment’s path into a numpy array: [x, y, theta, angular_speed, radius].
+        """
+        path_coords = np.array(self.shapely_path.coords)
+        x = path_coords[:, 0]
+        y = path_coords[:, 1]
+
         if self.type == 'STRAIGHT':
-            path_coords = np.array(self.shapely_path.coords)
-            x = path_coords[:, 0]
-            y = path_coords[:, 1]
-            theta = np.ones(len(x))*self.start.theta
+            theta = np.ones(len(x)) * self.start.theta
             angular_speed = np.zeros(len(x))
-            radius = np.ones(len(x))*np.inf
-            return np.vstack([x, y, theta,angular_speed,radius]).T
+            radius = np.ones(len(x)) * np.inf
         elif self.type == 'LEFT':
-            path_coords = np.array(self.shapely_path.coords)
-            x = path_coords[:, 0]
-            y = path_coords[:, 1]
             angles = np.linspace(0, self.sector, len(x))
-            angular_speed =  self.speed/self.radius * np.ones(len(x))
-            theta = self.start.theta + angles 
-            radius = self.radius*np.ones(len(x))
-            return np.vstack([x, y, theta,angular_speed,radius]).T
+            angular_speed = (self.speed / self.radius) * np.ones(len(x))
+            theta = self.start.theta + angles
+            radius = self.radius * np.ones(len(x))
         elif self.type == 'RIGHT':
-            path_coords = np.array(self.shapely_path.coords)
-            x = path_coords[:, 0]
-            y = path_coords[:, 1]
             angles = np.linspace(0, self.sector, len(x))
-            angular_speed =  -self.speed/self.radius * np.ones(len(x))
-            theta = self.start.theta - angles 
-            radius = self.radius*np.ones(len(x))
-            return np.vstack([x, y, theta,angular_speed,radius]).T
+            angular_speed = -(self.speed / self.radius) * np.ones(len(x))
+            theta = self.start.theta - angles
+            radius = self.radius * np.ones(len(x))
+
+        return np.vstack([x, y, theta, angular_speed, radius]).T
 
 class DuckieCorner:
-    def __init__(self, pose:SETransform, radius: float, type: str):
+    """
+    Represents a corner in the map. Used to determine poses for Dubins paths around corners.
+    """
+    def __init__(self, pose: SETransform, radius: float, type: str):
         self.pose = pose
         self.radius = radius
         self.type = type
         self.shapely_obs = self.get_obs() 
         self.placement = self.get_poses_dubins()
+
     def get_poses_dubins(self):
-        
-        self.placement_x = self.pose.x + self.radius*np.cos(self.pose.theta - np.pi/2)
-        self.placement_y = self.pose.y + self.radius*np.sin(self.pose.theta - np.pi/2)
+        """
+        Compute a transformed pose around the corner radius to use as a reference for Dubins planning.
+        """
+        self.placement_x = self.pose.x + self.radius * np.cos(self.pose.theta - np.pi/2)
+        self.placement_y = self.pose.y + self.radius * np.sin(self.pose.theta - np.pi/2)
         self.placement_theta = self.pose.theta
         return SETransform(self.placement_x, self.placement_y, self.placement_theta)
         
     def get_obs(self):
-        return sg.Point((self.pose.x,self.pose.y)).buffer(self.radius-0.1)
+        """
+        Represent the corner as a circular obstacle (buffered point).
+        """
+        return sg.Point((self.pose.x, self.pose.y)).buffer(self.radius - 0.1)
+
     def update_corners(self, new_radius):
+        """
+        Update the corner radius and the associated obstacle representation.
+        """
         self.radius = new_radius
         self.shapely_obs = self.get_obs() 
         self.placement = self.get_poses_dubins()
-    
+
 class DuckieObstacle:
-    def __init__(self, pose: SETransform, radius: float): #type is left or right
+    """
+    Represents a static obstacle (like a cone or a stationary object).
+    Used to check if a path intersects with its occupied space.
+    """
+    def __init__(self, pose: SETransform, radius: float):
         self.pose = pose
         self.radius = radius
         self.shapely_obs = sg.Point(pose.x, pose.y).buffer(radius)
         self.obs_speed = 0.1
 
     def check_collision(self, path: sg.LineString):
-        
+        """Check if the given path intersects the obstacle."""
         return path.intersects(self.shapely_obs)
+
     def get_poses_dubins(self, duckie_pose: SETransform):
-        placement_x = self.pose.x + self.radius*np.cos(duckie_pose.theta + np.pi/2)
-        placement_y = self.pose.y + self.radius*np.sin(duckie_pose.theta + np.pi/2)
+        """
+        Compute a pose to use in Dubins path calculations, offset by the obstacle’s radius.
+        """
+        placement_x = self.pose.x + self.radius * np.cos(duckie_pose.theta + np.pi/2)
+        placement_y = self.pose.y + self.radius * np.sin(duckie_pose.theta + np.pi/2)
         placement_theta = duckie_pose.theta
         return SETransform(placement_x, placement_y, placement_theta)
 
 class DuckieNode:
-    def __init__(self,pose: SETransform, parent = None, next = None, tag_id = None):
+    """
+    Represents a node on the global path, possibly associated with a corner and an AprilTag.
+    Nodes can be linked to form a path (parent/next).
+    """
+    def __init__(self, pose: SETransform, parent=None, next=None, tag_id=None):
         self.x = pose.x
         self.y = pose.y
         self.theta = pose.theta
@@ -164,18 +207,25 @@ class DuckieNode:
         self.next = None
         self.tag_id = tag_id
         self.corner = None
+
     def insert_corner(self, corner: DuckieCorner):
         self.corner = corner
+
     def insert_next(self, node):
         self.next = node
+
     def insert_parent(self, node):
         self.parent = node
+
     def insert_tag(self, tag_id):
         self.tag_id = tag_id
-    
-    
+
 class dubins:
-    def __init__(self,start: SETransform, goal: SETransform,n_segments: int, speed: float,radius1: float,radius2: float):
+    """
+    A Dubins path solver to find shortest paths under curvature constraints.
+    Tries various path configurations (e.g., internal/external tangents) to find the optimal path.
+    """
+    def __init__(self, start: SETransform, goal: SETransform, n_segments: int, speed: float, radius1: float, radius2: float):
         self.start = start
         self.goal = goal
         self.speed = speed
@@ -183,9 +233,12 @@ class dubins:
         self.radius1 = radius1
         self.radius2 = radius2
         self.path = []
-        self.circle_radii = [0.3,0.6,0.9]
+        self.circle_radii = [0.3, 0.6, 0.9]  # Optional alternative radii for multi-radius attempts
 
-    def get_circles(self,pose: SETransform, radius: float) -> List[patches.Circle]:
+    def get_circles(self, pose: SETransform, radius: float) -> List[DubinCircle]:
+        """
+        Compute left/right Dubin circles for a given pose and turning radius.
+        """
         pose_normal_vector = np.array([np.cos(pose.theta), np.sin(pose.theta)])
         pose_center = np.array([pose.x, pose.y])
         left_center = pose_center + radius * np.array([-pose_normal_vector[1], pose_normal_vector[0]])
@@ -193,296 +246,271 @@ class dubins:
         left_circle = DubinCircle(left_center, radius, CircleType.LEFT)
         right_circle = DubinCircle(right_center, radius, CircleType.RIGHT)
         return [left_circle, right_circle]
-    def approximate_straight(self,start:SETransform, end:SETransform):
+
+    def approximate_straight(self, start: SETransform, end: SETransform):
+        """
+        Approximate a straight line between two points using line segments.
+        Returns a LineString and its length as the cost.
+        """
         n_seg = 20
         dist = np.linalg.norm(np.array([start.x, start.y]) - np.array([end.x, end.y]))
-        straight_cost = dist
-        x = np.linspace(start.x, end.x, n_seg+1)
-        y = np.linspace(start.y, end.y, n_seg+1)
-        points = []
-        for i in range(n_seg+1):
-            points.append([x[i], y[i]])
+        x = np.linspace(start.x, end.x, n_seg + 1)
+        y = np.linspace(start.y, end.y, n_seg + 1)
+        points = [[x[i], y[i]] for i in range(n_seg + 1)]
         line_string = sg.LineString(points)
-        return line_string, straight_cost
-    def approximate_circle(self,start:SETransform, end:SETransform,circle: DubinCircle):
-        #get the angle between the start and end
+        return line_string, dist
+
+    def approximate_circle(self, start: SETransform, end: SETransform, circle: DubinCircle):
+        """
+        Approximate an arc between start and end around a given Dubin circle.
+        Returns a LineString and arc length as cost.
+        """
         start_angle = np.arctan2(start.y - circle.y, start.x - circle.x)
         end_angle = np.arctan2(end.y - circle.y, end.x - circle.x)
+
+        # Adjust angles based on turn direction
         if circle.type == CircleType.LEFT.value:
             if start_angle < 0:
-                start_angle += 2*np.pi
+                start_angle += 2 * np.pi
             if end_angle < 0:
-                end_angle += 2*np.pi
+                end_angle += 2 * np.pi
             if start_angle > end_angle:
-                end_angle += 2*np.pi
+                end_angle += 2 * np.pi
             angle = end_angle - start_angle
             if angle < 0:
-                angle += 2*np.pi
+                angle += 2 * np.pi
         else:
             if start_angle > 0:
-                start_angle -= 2*np.pi
+                start_angle -= 2 * np.pi
             if end_angle > 0:
-                end_angle -= 2*np.pi
+                end_angle -= 2 * np.pi
             if start_angle < end_angle:
-                end_angle -= 2*np.pi
+                end_angle -= 2 * np.pi
             angle = end_angle - start_angle
             if angle > 0:
-                angle -= 2*np.pi
-        
+                angle -= 2 * np.pi
+
         n_seg = 20
-        circ_cost = np.abs(angle*circle.radius)
-        angle_step = angle/n_seg
+        circ_cost = np.abs(angle * circle.radius)
+        angle_step = angle / n_seg
         points = []
-        for i in range(n_seg+1):
-            theta = start_angle + i*angle_step
-            x = circle.x + circle.radius*np.cos(theta)
-            y = circle.y + circle.radius*np.sin(theta)
+        for i in range(n_seg + 1):
+            theta = start_angle + i * angle_step
+            x = circle.x + circle.radius * np.cos(theta)
+            y = circle.y + circle.radius * np.sin(theta)
             points.append([x, y])
         line_string = sg.LineString(points)
-        return line_string,circ_cost
+        return line_string, circ_cost
+
     def cost(self, result):
-        #sum the segments of start circle 
+        """
+        Compute cost from a given solution’s sectors (arcs) and straight line.
+        This is mainly a utility if needed for debugging.
+        """
         sector1 = result['sector1']
-        c1  = np.abs(sector1[1]* sector1[0])
+        c1 = np.abs(sector1[1] * sector1[0])
         sector2 = result['sector2']
-        c2 =np.abs(sector2[1]* sector2[0])
+        c2 = np.abs(sector2[1] * sector2[0])
         p1 = np.array([result['p1'].x, result['p1'].y])
         p2 = np.array([result['p2'].x, result['p2'].y])
         c3 = np.linalg.norm(p1 - p2)
-
         return c1 + c2 + c3
-       
+
     def solve_single(self, radius1: float, radius2: float):
+        """
+        Attempt to solve the Dubins path problem with given radii (radius1, radius2).
+        Tries all connection types (LL, LR, RR, RL) and chooses the best result.
+        """
         circle1 = self.get_circles(self.start, self.radius1)
         circle2 = self.get_circles(self.goal, self.radius2)
         results = {}
-        
-        c1 = circle1
-        c2 = circle2
 
-        
-
-        solve_result = self.external_solve(self.start, self.goal, c1[0], c2[0])
-        temp_result = {}
+        # LL
+        solve_result = self.external_solve(self.start, self.goal, circle1[0], circle2[0])
         if solve_result is not None:
+            cost = sum([seg.cost for seg in solve_result])
+            results['ll'] = {'path': solve_result, 'cost': cost}
 
-            temp_result['path'] = solve_result
-            cost = 0
-            for duckie_p in solve_result:
-                cost += duckie_p.cost
-            temp_result['cost'] = cost
-            results['ll'] = temp_result
-
-
-        temp_result = {}
-        solve_result = self.internal_solve(self.start, self.goal, c1[0], c2[1])
+        # LR
+        solve_result = self.internal_solve(self.start, self.goal, circle1[0], circle2[1])
         if solve_result is not None:
-            temp_result['path'] = solve_result
-            cost = 0
-            for duckie_p in solve_result:
-                cost += duckie_p.cost
-            temp_result['cost'] = cost
-            results['lr'] = temp_result
+            cost = sum([seg.cost for seg in solve_result])
+            results['lr'] = {'path': solve_result, 'cost': cost}
 
-        temp_result = {}
-        solve_result = self.external_solve(self.start, self.goal, c1[1], c2[1])
+        # RR
+        solve_result = self.external_solve(self.start, self.goal, circle1[1], circle2[1])
         if solve_result is not None:
-            temp_result['path'] = solve_result
-            cost = 0
-            for duckie_p in solve_result:
-                cost += duckie_p.cost
-            temp_result['cost'] = cost
-            results['rr'] = temp_result
+            cost = sum([seg.cost for seg in solve_result])
+            results['rr'] = {'path': solve_result, 'cost': cost}
 
-        temp_result = {}
-        solve_result = self.internal_solve(self.start, self.goal, c1[1], c2[0])
+        # RL
+        solve_result = self.internal_solve(self.start, self.goal, circle1[1], circle2[0])
         if solve_result is not None:
-            temp_result['path'] = solve_result
-            cost = 0
-            for duckie_p in solve_result:
-                cost += duckie_p.cost
-            temp_result['cost'] = cost
-            results['rl'] = temp_result
-            
+            cost = sum([seg.cost for seg in solve_result])
+            results['rl'] = {'path': solve_result, 'cost': cost}
+
         if results == {}:
             return None
         best_key = min(results, key=lambda k: results[k]['cost'])
-        best_result = results[best_key]
-        return best_result
-    
-        
-    def solve(self, multi_circles: bool = False, obstacle_pose:  int = None):
+        return results[best_key]
+
+    def solve(self, multi_circles: bool = False, obstacle_pose: int = None):
+        """
+        Solve the Dubins path with the given configuration.
+        If multi_circles is True, try multiple radius configurations.
+        If obstacle_pose is set, adapt the radii accordingly.
+        """
         best_paths = []
-        #obstacle_pose is the index of the circle that is the obstacle 0 for none
+
         if obstacle_pose is not None and multi_circles:
+            # Modify one of the radii sets depending on the obstacle_pose
             if obstacle_pose == 0:
                 for r in self.circle_radii:
                     result = self.solve_single(r, self.radius2)
-                    
-                    
                     if result is not None:
-                        print('solving with radius', r, 'cost of path'  ,result['cost'])
+                        print('solving with radius', r, 'cost of path', result['cost'])
                         best_paths.append(result)
-            elif obstacle_pose == 1: 
+            elif obstacle_pose == 1:
                 for r in self.circle_radii:
                     result = self.solve_single(self.radius1, r)
                     if result is not None:
                         best_paths.append(result)
         elif multi_circles and obstacle_pose is None:
+            # Try all combinations of predefined radii
             for r1 in self.circle_radii:
                 for r2 in self.circle_radii:
                     result = self.solve_single(r1, r2)
                     if result is not None:
                         best_paths.append(result)
         else:
+            # Use the given radii without variation
             result = self.solve_single(self.radius1, self.radius2)
             if result is not None:
                 best_paths.append(result)
-        
+
         if best_paths == []:
             return None
         best_result = min(best_paths, key=lambda x: x['cost'])
-
         return best_result['path']
-        
 
-            
-        #find the shortest path with n segments
-    
-    def external_solve(self,start,end,circle1,circle2):
-        #find the tangent lines connecting the circles
-         #for case of same radii 
+    def external_solve(self, start, end, circle1, circle2):
+        """
+        Compute an external tangent solution (e.g., LSL or RSR type paths).
+        Returns a list of DuckieSegments if a solution is found.
+        """
         y_mir = 1
-        alpha  = np.arctan2(circle2.y - circle1.y, circle2.x - circle1.x)
+        alpha = np.arctan2(circle2.y - circle1.y, circle2.x - circle1.x)
+
+        # Handle the case of equal circle radii
         if circle1.radius == circle2.radius:
-            #find the two possible circles
-            alpha  = np.arctan2(circle2.y - circle1.y, circle2.x - circle1.x)
             d = np.linalg.norm(np.array(circle1.center) - np.array(circle2.center))
-            p1_x =  circle1.x + circle1.radius * np.cos(alpha + circle1.type*np.pi/2)
-            p1_y =  circle1.y + circle1.radius * np.sin(alpha + circle1.type*np.pi/2)
-            p2_x =  circle2.x + circle2.radius * np.cos(alpha + circle2.type*np.pi/2)
-            p2_y =  circle2.y + circle2.radius * np.sin(alpha + circle2.type*np.pi/2)
-        else: 
+            p1_x = circle1.x + circle1.radius * np.cos(alpha + circle1.type * np.pi/2)
+            p1_y = circle1.y + circle1.radius * np.sin(alpha + circle1.type * np.pi/2)
+            p2_x = circle2.x + circle2.radius * np.cos(alpha + circle2.type * np.pi/2)
+            p2_y = circle2.y + circle2.radius * np.sin(alpha + circle2.type * np.pi/2)
+        else:
+            # Different radii
+            switcheroo = False
             if circle1.radius < circle2.radius:
-                circle1,circle2 = circle2,circle1
+                circle1, circle2 = circle2, circle1
                 y_mir = -1
                 switcheroo = True
-            else:
-                switcheroo = False
             
             d = np.linalg.norm(np.array(circle1.center) - np.array(circle2.center))
-            # if d < np.min([circle1.radius,circle2.radius])/2:
-            #     return None
             new_radius = np.abs(circle1.radius - circle2.radius)
-            inbetween_center = [circle1.x + (circle2.x-circle1.x)/2, circle1.y + (circle2.y-circle1.y)/2]
-            inbetween_radius = d/2
-            d1 = (new_radius**2 )/(2*inbetween_radius)
+            inbetween_radius = d / 2
+            d1 = (new_radius**2) / (2 * inbetween_radius)
             if new_radius**2 - d1**2 < 0:
-                print('error','newrad', new_radius,'d1',d1, 'inbetween',inbetween_radius)
+                print('error', 'newrad', new_radius, 'd1', d1, 'inbetween', inbetween_radius)
                 return None
-
             h = np.sqrt(new_radius**2 - d1**2)
-            rel_angle = np.arctan2(circle1.type*h,y_mir*d1)
+            rel_angle = np.arctan2(circle1.type * h, y_mir * d1)
 
             theta = rel_angle + alpha
             if switcheroo:
                 circle1, circle2 = circle2, circle1
-            p1_x =  circle1.x + circle1.radius * np.cos(theta)
-            p1_y =  circle1.y + circle1.radius * np.sin(theta)
-            p2_x =  circle2.x + circle2.radius * np.cos(theta)
-            p2_y =  circle2.y + circle2.radius * np.sin(theta)
-        start_angle = start.theta + circle1.type*np.pi/2
-        end_angle = end.theta + circle1.type*np.pi/2
+            p1_x = circle1.x + circle1.radius * np.cos(theta)
+            p1_y = circle1.y + circle1.radius * np.sin(theta)
+            p2_x = circle2.x + circle2.radius * np.cos(theta)
+            p2_y = circle2.y + circle2.radius * np.sin(theta)
+
+        start_angle = start.theta + circle1.type * np.pi/2
+        end_angle = end.theta + circle1.type * np.pi/2
         sector1 = [np.arctan2(p1_y - circle1.y, p1_x - circle1.x) - start_angle, circle1.radius]
         sector2 = [np.arctan2(p2_y - circle2.y, p2_x - circle2.x) - end_angle, circle2.radius]
         p1_angle = np.arctan2(p1_y - circle1.y, p1_x - circle1.x) - circle1.type * np.pi/2
         p2_angle = np.arctan2(p2_y - circle2.y, p2_x - circle2.x) - circle1.type * np.pi/2
         p1 = SETransform(p1_x, p1_y, p1_angle)
         p2 = SETransform(p2_x, p2_y, p2_angle)
-        line_1,_ = self.approximate_straight(p1,p2)
-        start_circle,start_circle_cost = self.approximate_circle(start,p1, circle1)
-        end_circle,end_circle_cost= self.approximate_circle(p2,end, circle2)
+
+        line_1, _ = self.approximate_straight(p1, p2)
+        start_circle, start_circle_cost = self.approximate_circle(start, p1, circle1)
+        end_circle, end_circle_cost = self.approximate_circle(p2, end, circle2)
         straight_cost = np.linalg.norm(np.array([p1_x, p1_y]) - np.array([p2_x, p2_y]))
-        if circle1.type == 1:
-            c1_type = 'RIGHT'
-        else:
-            c1_type = 'LEFT'
-        if circle2.type == 1:
-            c2_type = 'RIGHT'
-        else:
-            c2_type = 'LEFT'
-        cost = start_circle_cost + end_circle_cost + straight_cost 
-        res_dict = {'line': line_1, 'sector1': sector1, 'sector2': sector2, 'p1': p1, 'p2': p2,'start': start, 'goal': end,
-                    'start_circle': start_circle, 'end_circle': end_circle,'cost': cost, 'c1_type': c1_type, 'c2_type': c2_type}
-        
-        duckie_path= []
-        
-        duckie_path.append(DuckieSegment(start, p1, sector1[1], c1_type ,start_circle,start_circle_cost,self.speed))
-        duckie_path.append(DuckieSegment(p1, p2, 0, 'STRAIGHT', line_1,straight_cost,self.speed))
-        duckie_path.append(DuckieSegment(p2,end, sector2[1], c2_type, end_circle,end_circle_cost,self.speed))
+
+        c1_type = 'RIGHT' if circle1.type == 1 else 'LEFT'
+        c2_type = 'RIGHT' if circle2.type == 1 else 'LEFT'
+        cost = start_circle_cost + end_circle_cost + straight_cost
+
+        duckie_path = []
+        duckie_path.append(DuckieSegment(start, p1, sector1[1], c1_type, start_circle, start_circle_cost, self.speed))
+        duckie_path.append(DuckieSegment(p1, p2, 0, 'STRAIGHT', line_1, straight_cost, self.speed))
+        duckie_path.append(DuckieSegment(p2, end, sector2[1], c2_type, end_circle, end_circle_cost, self.speed))
     
         return duckie_path
-    
-    def internal_solve(self,start,end, circle1,circle2):
-    #find the shortest path between two circles
-        alpha  = np.arctan2(circle2.y - circle1.y, circle2.x - circle1.x)
+
+    def internal_solve(self, start, end, circle1, circle2):
+        """
+        Compute an internal tangent solution (e.g., LSR or RSL type paths).
+        Returns a list of DuckieSegments if a solution is found.
+        """
+        alpha = np.arctan2(circle2.y - circle1.y, circle2.x - circle1.x)
         d = np.linalg.norm(np.array(circle1.center) - np.array(circle2.center))
         if d < circle1.radius + circle2.radius:
-                print('error for internal')
-                return None
-        new_radius = np.abs(circle1.radius +circle2.radius)
-        inbetween_center = [circle1.x + (circle2.x-circle1.x)/2, circle1.y + (circle2.y-circle1.y)/2]
-        inbetween_radius = d/2
-        d1 = (new_radius**2 )/(2*inbetween_radius)
-        
+            print('error for internal')
+            return None
 
+        new_radius = np.abs(circle1.radius + circle2.radius)
+        inbetween_radius = d / 2
+        d1 = (new_radius**2) / (2 * inbetween_radius)
         h = np.sqrt(new_radius**2 - d1**2)
-        rel_angle = np.arctan2(h,d1)
+        rel_angle = np.arctan2(h, d1)
 
-        theta = circle1.type*rel_angle + alpha
-        p1_x =  circle1.x + circle1.radius * np.cos(theta)
-        p1_y =  circle1.y + circle1.radius * np.sin(theta)
-        p2_x =  circle2.x + circle2.radius * np.cos(theta+np.pi)
-        p2_y =  circle2.y + circle2.radius * np.sin(theta+np.pi)
+        theta = circle1.type * rel_angle + alpha
+        p1_x = circle1.x + circle1.radius * np.cos(theta)
+        p1_y = circle1.y + circle1.radius * np.sin(theta)
+        p2_x = circle2.x + circle2.radius * np.cos(theta + np.pi)
+        p2_y = circle2.y + circle2.radius * np.sin(theta + np.pi)
 
-        start_angle = start.theta + circle1.type*np.pi/2
-        end_angle = end.theta + circle1.type*np.pi/2
-        sector1 = [np.arctan2(p1_y - circle1.y, p1_x - circle1.x) - start_angle,circle1.radius]
-        sector2 = [np.arctan2(p2_y - circle2.y, p2_x - circle2.x) - end_angle,circle2.radius]
+        start_angle = start.theta + circle1.type * np.pi/2
+        end_angle = end.theta + circle1.type * np.pi/2
+        sector1 = [np.arctan2(p1_y - circle1.y, p1_x - circle1.x) - start_angle, circle1.radius]
+        sector2 = [np.arctan2(p2_y - circle2.y, p2_x - circle2.x) - end_angle, circle2.radius]
+
         p1_angle = np.arctan2(p1_y - circle1.y, p1_x - circle1.x) - circle1.type * np.pi/2
         p2_angle = np.arctan2(p2_y - circle2.y, p2_x - circle2.x) - circle2.type * np.pi/2
         p1 = SETransform(p1_x, p1_y, p1_angle)
         p2 = SETransform(p2_x, p2_y, p2_angle)
-        line_1,_ = self.approximate_straight(p1,p2)
-        start_circle,start_circle_cost = self.approximate_circle(start,p1, circle1)
-        end_circle,end_circle_cost= self.approximate_circle(p2,end, circle2)
+
+        line_1, _ = self.approximate_straight(p1, p2)
+        start_circle, start_circle_cost = self.approximate_circle(start, p1, circle1)
+        end_circle, end_circle_cost = self.approximate_circle(p2, end, circle2)
         straight_cost = np.linalg.norm(np.array([p1_x, p1_y]) - np.array([p2_x, p2_y]))
-        if circle1.type == 1:
-            c1_type = 'RIGHT'
-        else:
-            c1_type = 'LEFT'
-        if circle2.type == 1:
-            c2_type = 'RIGHT'
-        else:
-            c2_type = 'LEFT'
-        cost = start_circle_cost + end_circle_cost + straight_cost 
-        res_dict = {'line': line_1, 'sector1': sector1, 'sector2': sector2, 'p1': p1, 'p2': p2,'start': start, 'goal': end,
-                    'start_circle': start_circle, 'end_circle': end_circle,'cost': cost, 'c1_type': c1_type, 'c2_type': c2_type}
-        duckie_path= []
-        
-        duckie_path.append(DuckieSegment(start, p1, sector1[1], c1_type ,start_circle,start_circle_cost,self.speed))
-        duckie_path.append(DuckieSegment(p1, p2, 0, 'STRAIGHT', line_1,straight_cost,self.speed))
-        duckie_path.append(DuckieSegment(p2,end, sector2[1], c2_type, end_circle,end_circle_cost,self.speed))
+
+        c1_type = 'RIGHT' if circle1.type == 1 else 'LEFT'
+        c2_type = 'RIGHT' if circle2.type == 1 else 'LEFT'
+
+        duckie_path = []
+        duckie_path.append(DuckieSegment(start, p1, sector1[1], c1_type, start_circle, start_circle_cost, self.speed))
+        duckie_path.append(DuckieSegment(p1, p2, 0, 'STRAIGHT', line_1, straight_cost, self.speed))
+        duckie_path.append(DuckieSegment(p2, end, sector2[1], c2_type, end_circle, end_circle_cost, self.speed))
     
         return duckie_path
             
     def checker(self, circle1, circle2):
-        #check if the circles intersect
-        if np.linalg.norm(np.array(circle1.center) - np.array(circle2.center)) < circle1.radius + circle2.radius:
-            return True
-        else:
-            return False
-        
+        """Check if two circles intersect."""
+        return np.linalg.norm(np.array(circle1.center) - np.array(circle2.center)) < circle1.radius + circle2.radius
+
 
 
 
